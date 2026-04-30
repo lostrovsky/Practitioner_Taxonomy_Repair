@@ -1,0 +1,24 @@
+{
+  "file": {
+    "delimiter": "|",
+    "outputFilePath": "practitioner_taxonomy_repair.report.csv"
+  },
+  "request": {
+    "practitionerHccId": "/Envelope/Body/practitioner/practitioner/practitionerHccId"
+  },
+  "response": {
+    "status": "/Envelope/Body/practitionerResponse/status",
+    "practitionerIdentifier": "/Envelope/Body/practitionerResponse/practitioner/practitionerIdentifier",
+    "practitionerHccId": "/Envelope/Body/practitionerResponse/practitioner/practitionerHccId",
+    "alreadyInWorkbasket": "/Envelope/Body/practitionerResponse/transactionInformation/alreadyInWorkbasket",
+    "blockedByLock": "/Envelope/Body/practitionerResponse/transactionInformation/blockedByLock",
+    "cvcId": "/Envelope/Body/practitionerResponse/transactionInformation/cvcId",
+    "needsRepair": "/Envelope/Body/practitionerResponse/transactionInformation/needsRepair",
+    "needsReview": "/Envelope/Body/practitionerResponse/transactionInformation/needsReview",
+    "rejected": "/Envelope/Body/practitionerResponse/transactionInformation/rejected",
+    "exceptionType": "/Envelope/Body/practitionerResponse/transactionInformation/exceptions/exceptionType",
+    "exceptionMessageCode": "/Envelope/Body/practitionerResponse/transactionInformation/exceptions/messageCode",
+    "exceptionMessageDescription": "/Envelope/Body/practitionerResponse/transactionInformation/exceptions/messageDescription",
+    "exceptionPolicyName": "/Envelope/Body/practitionerResponse/transactionInformation/exceptions/policyName"
+  }
+}

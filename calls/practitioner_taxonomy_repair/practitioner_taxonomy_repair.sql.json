@@ -1,0 +1,13 @@
+{
+  "description": "Post-call SQL for practitioner_taxonomy_repair -- marks the cpe_repair.practitioner_repair row loaded/failed",
+  "request": {
+    "practitionerHccId": "/Envelope/Body/practitioner/practitioner/practitionerHccId"
+  },
+  "response": {
+    "status": "/Envelope/Body/practitionerResponse/status"
+  },
+  "sql": {
+    "successStatement": "EXEC [cpe_repair].[sp_mark_practitioner_repair_loaded] @entity_id = :context.entity_id, @success = 1, @error_message = NULL",
+    "errorStatement":  "EXEC [cpe_repair].[sp_mark_practitioner_repair_loaded] @entity_id = :context.entity_id, @success = 0, @error_message = 'error loading to HRP'"
+  }
+}
