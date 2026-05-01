@@ -40,3 +40,7 @@ tmpclaude-*
 
 # Local-only
 temp/
+
+# Release artifacts (built by deploy/build_package.ps1 -- distributed via GitHub Releases)
+deploy/*.zip
+deploy/stage/
