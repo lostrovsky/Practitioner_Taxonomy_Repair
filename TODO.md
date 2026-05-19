@@ -8,6 +8,10 @@
 
 ## Production setup
 
+> The DDL-apply, credential-fill, and call-folder-copy steps below are now
+> automated by `deploy/install.ps1` (one command, idempotent, upgrade-safe).
+> The manual steps remain here as the fallback / detailed reference.
+
 - [ ] **Apply DDL to production DB:** `sqlcmd -S <server> -d <db> -U <user> -P <pwd> -i sql/create_cpe_repair_objects.sql`. Idempotent; safe to re-run.
 - [ ] **Build the jar on the deploy machine:** `mvn clean package -DskipTests`. Requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn install -DskipTests` from that project first).
 - [ ] **Fill in real DB credentials** in `target/PractitionerTaxonomyRepair.properties` (or pass `--properties-file=<path>` to point at a different config).
@@ -43,3 +47,4 @@
 - [x] Verified end-to-end against NPI 1003008574 in LOG_ONLY mode — SOAP renders correctly, post-call SQL targets the right entity_id
 - [x] Verified isolation: no writes to `cpe.*`, `cpe_load.*`, or `cpe_master.*`; `cpe_load.load_run` sequence not consumed
 - [x] Pushed to GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair
+- [x] Automated installer `deploy/install.ps1`. Reads DB connection from `PractitionerTaxonomyRepair.properties` (parses `db.url`/`db.user`/`db.password`; CLI params optional and override per-field; only `-LoaderInstallPath` mandatory). Applies DDL, configures, copies call folder. Idempotent and upgrade-safe per Mindful File Replacement doctrine (properties file untouched unless explicitly overriding placeholders or `-Force`; call folder backed up before `-Force` replace). `-WhatIf`/`-Force`/`-SkipDdl`/`-SqlcmdPath`/`-DbPort`. Wired into `build_package.ps1` (staged at zip root); INSTALL.txt updated with a quick-install section.

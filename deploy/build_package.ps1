@@ -87,6 +87,15 @@ if (Test-Path "$PROJECT_ROOT\deploy\INSTALL.txt") {
     Copy-Item "$PROJECT_ROOT\deploy\INSTALL.txt" "$STAGE_DIR\"
 }
 
+# Automated installer -- lands at the zip root so it sits beside the jar,
+# properties, sql\ and calls\ that it expects as siblings.
+if (-not (Test-Path "$PROJECT_ROOT\deploy\install.ps1")) {
+    Write-Error "deploy\install.ps1 not found -- cannot package without the installer"
+    Remove-Item $STAGE_DIR -Recurse -Force
+    exit 1
+}
+Copy-Item "$PROJECT_ROOT\deploy\install.ps1" "$STAGE_DIR\"
+
 # Version metadata
 $versionContent = @(
     "VERSION=$VERSION",

@@ -23,6 +23,60 @@ PREREQUISITES
   the call folder)
 
 ============================================================
+QUICK INSTALL (AUTOMATED) -- recommended
+============================================================
+install.ps1 does STEPS 2, 3 and 4 in one command (apply DDL,
+configure the tool, copy the call folder).
+
+The DB connection comes from PractitionerTaxonomyRepair.properties
+-- the same file the Java tool reads -- so you only enter it once.
+
+Normal flow:
+
+  1. Extract the zip (STEP 1 below).
+  2. Edit the three db.* lines in PractitionerTaxonomyRepair.properties
+     (STEP 3 below) -- the tool needs them filled in to run anyway.
+  3. Run, supplying only your loader path:
+
+       cd C:\Tools\Practitioner_Taxonomy_Repair
+       .\install.ps1 -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
+
+install.ps1 parses db.url / db.user / db.password from the properties
+file, applies the DDL with them, and copies the call folder.
+
+You may instead pass DB values on the command line -- each one given
+overrides the matching properties value, and (if the file still has
+placeholders) is written into it, so you can skip step 2:
+
+    .\install.ps1 -SqlServer <server> -Database <db> ^
+                   -DbUser <user> -DbPassword <password> ^
+                   -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
+
+Optional flags:
+  -DbPort <n>       SQL Server port. Default 1433, or the port already
+                    embedded in db.url. Ignored for named instances.
+  -SqlcmdPath <p>   explicit path to sqlcmd.exe if not on PATH
+  -SkipDdl          do not apply the DDL (objects already exist)
+  -Force            overwrite an already-configured properties file
+                    with CLI values, and/or replace an existing call
+                    folder (the old one is backed up first)
+  -WhatIf           dry run -- show what would change, touch nothing
+
+Idempotent and upgrade-safe:
+  * The DDL guards every object, so re-running is harmless.
+  * The properties file is the source of truth: with no DB params on
+    the command line it is never modified. It is only written when
+    you pass DB params AND it still has placeholders (or you pass
+    -Force).
+  * An existing call folder (which may carry operator edits such
+    as the <maintenanceReasonCode> values) is NOT replaced unless
+    you pass -Force, and is backed up to a timestamped sibling
+    folder first.
+
+If you prefer to do it by hand, or install.ps1 reports a problem,
+follow STEPS 2-4 manually below. Then continue at STEP 5.
+
+============================================================
 STEP 1: EXTRACT
 ============================================================
 Extract the release zip wherever you want this tool to live. e.g.:
@@ -33,6 +87,7 @@ Resulting layout:
 
     practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar
     PractitionerTaxonomyRepair.properties     (placeholder DB creds)
+    install.ps1                               (automated installer)
     version.txt
     sql\
         create_cpe_repair_objects.sql

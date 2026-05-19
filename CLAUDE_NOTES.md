@@ -76,6 +76,10 @@ Practitioner_Taxonomy_Repair/
 ├── CLAUDE.md, CLAUDE_NOTES.md, TODO.md, README.md
 ├── .claude/settings.local.json
 ├── .gitignore
+├── deploy/
+│   ├── build_package.ps1                       (build machine: produces the release zip)
+│   ├── install.ps1                             (operator: automates INSTALL.txt steps 2-4; ships at zip root)
+│   └── INSTALL.txt                             (manual runbook; bundled into the zip)
 ├── sql/
 │   └── create_cpe_repair_objects.sql           (idempotent; run once per environment)
 ├── calls/
@@ -159,6 +163,43 @@ Sanity-checked after run: `cpe_load.load_run` latest run_id unchanged; `cpe_mast
 - **`<maintenanceReasonCode>`** in the call folder template is still `PractitionerCreateReason / 1` (mirrored from existing amend template). HRP-correct amend reason for a taxonomy overlay is a long-standing TODO carried over from the Pipeline project. Adjust in `calls/practitioner_taxonomy_repair/practitioner_taxonomy_repair.properties` once those values are known.
 - **`<updateMode>REPLACE</updateMode>`** in the `<specialties>` block enforces complete-overlay semantics. The existing daily-pipeline `practitioner_amends` uses `MERGE`. Verify HRP behavior matches expectations.
 
+## Installer
+
+`deploy/install.ps1` automates INSTALL.txt steps 2-4 (apply DDL, configure,
+copy call folder) into one command. It is staged at the zip *root* by
+`build_package.ps1` so it sits beside the jar / properties / `sql\` / `calls\`
+it expects as siblings.
+
+**DB connection source of truth = `PractitionerTaxonomyRepair.properties`.**
+The four DB params (`-SqlServer/-Database/-DbUser/-DbPassword`) are optional;
+only `-LoaderInstallPath` is mandatory. The installer parses `db.url` (host,
+port, databaseName -- handles `host`, `host:port`, `host,port`,
+`host\instance`, `host\instance:port`), `db.user`, `db.password` from the
+file. Any CLI DB param overrides the matching field. Rationale: the operator
+must fill that file in for the Java tool to run anyway, so requiring the same
+creds again on the installer command line was pure duplication. (Considered
+and rejected a separate answer file -- it would put creds in two places.)
+
+Upgrade-safety follows the "Mindful File Replacement" doctrine:
+
+- **DDL**: idempotent already; the installer just runs it with the resolved
+  creds (`-SkipDdl` to skip, `-WhatIf` for a dry run).
+- **`PractitionerTaxonomyRepair.properties`**: it is the source of truth, so
+  with no DB params on the command line it is **never modified**. It is only
+  rewritten (targeted: only `db.url`/`db.user`/`db.password`; comments and
+  schema lines byte-identical) when the operator passes DB params AND the file
+  still has `YOUR_*` placeholders, or passes `-Force`.
+- **Call folder**: never silently overwritten. A fresh target is copied; an
+  existing one (which may carry the operator's `<maintenanceReasonCode>` edit)
+  is only replaced with `-Force`, and is moved to a timestamped
+  `practitioner_taxonomy_repair.bak.<ts>` sibling first.
+
+Design tradeoff: the call folder is replaced wholesale (with backup) rather
+than per-line variable-merged. Per-line preservation of a multi-line SOAP
+template is fragile and not worth it for a one-off remediation tool; the
+timestamped backup keeps operator edits recoverable, which satisfies the
+"mindful, recoverable, loudly reported" intent.
+
 ## State at Time of Notes
 
-Initial scaffold complete. DDL applied to dev DB. Smoke tested end-to-end against NPI 1003008574 in LOG_ONLY mode. Repository is its own GitHub repo. Not yet run against a real-data batch in production.
+Initial scaffold complete. DDL applied to dev DB. Smoke tested end-to-end against NPI 1003008574 in LOG_ONLY mode. Repository is its own GitHub repo. Not yet run against a real-data batch in production. Automated installer (`deploy/install.ps1`) added and wired into `build_package.ps1`.
