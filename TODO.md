@@ -8,13 +8,21 @@
 
 ## Production setup
 
-> The DDL-apply, credential-fill, and call-folder-copy steps below are now
-> automated by `deploy/install.ps1` (one command, idempotent, upgrade-safe).
-> The manual steps remain here as the fallback / detailed reference.
+> **Recommended path** (since v1.1.0): download the release zip from
+> https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases, extract
+> it, fill the three `db.*` lines in `PractitionerTaxonomyRepair.properties`,
+> then:
+>
+>     .\install.ps1 -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
+>
+> That one command applies the DDL, copies the call folder, and finishes the
+> setup. The manual steps below remain as the fallback / detailed reference
+> (and are still needed if you're building from source instead of using the
+> release zip).
 
 - [ ] **Apply DDL to production DB:** `sqlcmd -S <server> -d <db> -U <user> -P <pwd> -i sql/create_cpe_repair_objects.sql`. Idempotent; safe to re-run.
-- [ ] **Build the jar on the deploy machine:** `mvn clean package -DskipTests`. Requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn install -DskipTests` from that project first).
-- [ ] **Fill in real DB credentials** in `target/PractitionerTaxonomyRepair.properties` (or pass `--properties-file=<path>` to point at a different config).
+- [ ] **Build the jar on the deploy machine** (only if not using the release zip): `mvn clean package -DskipTests`. Requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn install -DskipTests` from that project first).
+- [ ] **Fill in real DB credentials** in `PractitionerTaxonomyRepair.properties` (in the extracted release dir, or `target/` if building from source; or pass `--properties-file=<path>` to point at a different config).
 - [ ] **Copy the call folder** `calls/practitioner_taxonomy_repair/` onto your loader install at `<install>/Claim_Provider_Data_Loader/practitioner_taxonomy_repair/`.
 
 ## First production run
@@ -37,7 +45,6 @@
 - [ ] **Concurrency for NPPES lookups.** Currently sequential. For a large batch (1000+ NPIs at ~500ms each = 8+ minutes), parallel HTTP calls would be a meaningful speedup. NPPES has rate limits — keep it modest (e.g., 5 concurrent).
 - [ ] **Local cache for `cpe_xref.taxonomy` lookups** if running multiple batches back-to-back. Currently fresh DB query per run.
 - [ ] **Diff/compare mode:** show what would change in HRP vs current `cpe_master` state without staging or pushing. Useful before committing a large batch.
-- [ ] **Release zip + GitHub Release** once the tool is proven on prod data. Mirror the build_package.ps1 pattern from `Claim_Provider_Data_Pipeline`. For now this stays source-only since it's a one-off remediation.
 
 ## Done
 
@@ -48,3 +55,5 @@
 - [x] Verified isolation: no writes to `cpe.*`, `cpe_load.*`, or `cpe_master.*`; `cpe_load.load_run` sequence not consumed
 - [x] Pushed to GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair
 - [x] Automated installer `deploy/install.ps1`. Reads DB connection from `PractitionerTaxonomyRepair.properties` (parses `db.url`/`db.user`/`db.password`; CLI params optional and override per-field; only `-LoaderInstallPath` mandatory). Applies DDL, configures, copies call folder. Idempotent and upgrade-safe per Mindful File Replacement doctrine (properties file untouched unless explicitly overriding placeholders or `-Force`; call folder backed up before `-Force` replace). `-WhatIf`/`-Force`/`-SkipDdl`/`-SqlcmdPath`/`-DbPort`. Wired into `build_package.ps1` (staged at zip root); INSTALL.txt updated with a quick-install section.
+- [x] **v1.0.0 GitHub Release** (2026-05-01, commit `b7c60bc`) — initial release with jar, DDL, call folder, `build_package.ps1`, `INSTALL.txt`. No installer; manual setup only. https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/tag/v1.0.0
+- [x] **v1.1.0 GitHub Release** (2026-05-19, commit `72a94c6`, marked Latest) — adds `install.ps1`; hardens `build_package.ps1` packaging with `ZipFile::CreateFromDirectory` + post-zip manifest check after a `Compress-Archive`/Windows-Defender race silently dropped a file in the first build attempt. Java code unchanged (jar still 1.0.0). https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/tag/v1.1.0

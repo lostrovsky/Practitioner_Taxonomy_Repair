@@ -200,6 +200,37 @@ template is fragile and not worth it for a one-off remediation tool; the
 timestamped backup keeps operator edits recoverable, which satisfies the
 "mindful, recoverable, loudly reported" intent.
 
+## Releases
+
+GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases
+
+| Tag | Date | Commit | Asset | Contents |
+|---|---|---|---|---|
+| `v1.0.0` | 2026-05-01 | `b7c60bc` | `practitioner_taxonomy_repair_v1.0.0.zip` | Initial release. Jar, DDL, call folder, `build_package.ps1` + `INSTALL.txt`. **No `install.ps1`** — install was fully manual. |
+| `v1.1.0` (Latest) | 2026-05-19 | `72a94c6` | `practitioner_taxonomy_repair_v1.1.0.zip` (~1.5 MB, 9 entries) | Adds `install.ps1` (properties-as-source, idempotent, upgrade-safe). Hardens `build_package.ps1` packaging (see below). Java code unchanged; jar inside the zip is still `practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` (pom version unchanged). |
+
+### Packaging gotcha (caught during v1.1.0 build — do not regress)
+
+The first v1.1.0 build silently produced a broken zip **missing `install.ps1`**.
+Root cause: `Compress-Archive` opens each staged file individually and races
+Windows Defender's real-time scan of freshly-written `.ps1` files, throwing
+`IOException` ("being used by another process") on the locked file -- but
+because the error is emitted from inside the `Microsoft.PowerShell.Archive`
+module, the caller's `$ErrorActionPreference='Stop'` did not promote it to
+terminating, and the script printed "Package created" with the file silently
+dropped.
+
+`build_package.ps1` was hardened to:
+- Use `[System.IO.Compression.ZipFile]::CreateFromDirectory` (single-shot,
+  doesn't race AV the same way) with one `IOException` retry.
+- Post-zip **manifest check** comparing every file under `deploy/stage/` to
+  the zip's entries -- a missing file aborts the build with `Write-Error` and
+  removes the bad zip.
+
+If anyone is tempted to "simplify" back to `Compress-Archive`: don't. The
+manifest check is the real safety net; the `CreateFromDirectory` swap is
+just defense-in-depth against the AV race.
+
 ## State at Time of Notes
 
-Initial scaffold complete. DDL applied to dev DB. Smoke tested end-to-end against NPI 1003008574 in LOG_ONLY mode. Repository is its own GitHub repo. Not yet run against a real-data batch in production. Automated installer (`deploy/install.ps1`) added and wired into `build_package.ps1`.
+Release `v1.1.0` shipped 2026-05-19 (commit `72a94c6`, marked Latest). v1.0.0 remains published and unchanged. DDL applied to dev DB only. Smoke tested end-to-end against NPI 1003008574 in `LOG_ONLY` mode. **Not yet run against a real-data batch in production** — the three blockers in TODO.md ("Blocking before first production run") still apply: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and confirming affected-practitioner scope.
