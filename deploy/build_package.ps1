@@ -107,9 +107,47 @@ Set-Content -Path "$STAGE_DIR\version.txt" -Value $versionContent -NoNewline
 # ============================================================
 # Compress
 # ============================================================
+# Use ZipFile::CreateFromDirectory, NOT Compress-Archive. Compress-Archive
+# opens each staged file individually and races Windows Defender's
+# real-time scan of freshly-written .ps1 files -- it can silently drop a
+# locked file from the archive while still reporting success. One retry
+# covers a transient AV/indexer lock; the post-zip manifest check below
+# is the real safety net (a dropped file fails the build loudly).
 Write-Host "Creating zip..." -ForegroundColor Cyan
 if (Test-Path $OUTPUT_ZIP) { Remove-Item $OUTPUT_ZIP }
-Compress-Archive -Path "$STAGE_DIR\*" -DestinationPath $OUTPUT_ZIP
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zipOk = $false
+for ($attempt = 1; $attempt -le 2 -and -not $zipOk; $attempt++) {
+    try {
+        [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $STAGE_DIR, $OUTPUT_ZIP,
+            [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        $zipOk = $true
+    }
+    catch [System.IO.IOException] {
+        if (Test-Path $OUTPUT_ZIP) { Remove-Item $OUTPUT_ZIP -Force }
+        if ($attempt -ge 2) { Write-Error "Zip creation failed (file lock): $($_.Exception.Message)"; Remove-Item $STAGE_DIR -Recurse -Force; exit 1 }
+        Write-Host "  zip attempt $attempt hit a file lock; retrying..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 2
+    }
+}
+
+# Manifest check -- the zip MUST contain everything we staged. This is what
+# turns a silent drop (the Compress-Archive failure mode) into a hard fail.
+$expected = (Get-ChildItem $STAGE_DIR -Recurse -File |
+    ForEach-Object { $_.FullName.Substring($STAGE_DIR.Length + 1).Replace('\','/') }) | Sort-Object
+$archive  = [System.IO.Compression.ZipFile]::OpenRead($OUTPUT_ZIP)
+$actual   = ($archive.Entries | ForEach-Object { $_.FullName.Replace('\','/') }) | Sort-Object
+$archive.Dispose()
+$dropped = $expected | Where-Object { $_ -notin $actual }
+if ($dropped) {
+    Write-Error ("Zip is missing staged files -- refusing to ship a broken package:`n  - " + ($dropped -join "`n  - "))
+    Remove-Item $OUTPUT_ZIP -Force
+    Remove-Item $STAGE_DIR -Recurse -Force
+    exit 1
+}
+Write-Host "Zip manifest verified: $($actual.Count) entries, all staged files present." -ForegroundColor Green
 
 Remove-Item $STAGE_DIR -Recurse -Force
 
