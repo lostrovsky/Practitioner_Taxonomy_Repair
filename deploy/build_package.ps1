@@ -40,8 +40,16 @@ try {
     Pop-Location
 }
 
-$jar = "$PROJECT_ROOT\target\practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar"
-if (-not (Test-Path $jar)) { Write-Error "Built jar not found at $jar"; exit 1 }
+# Discover the fat jar by glob -- decoupled from pom version so a pom bump
+# (e.g. 1.0.0 -> 1.2.0) does not require touching this script.
+$jarCandidates = @(Get-ChildItem "$PROJECT_ROOT\target\practitioner-taxonomy-repair-*-jar-with-dependencies.jar" -ErrorAction SilentlyContinue)
+if ($jarCandidates.Count -ne 1) {
+    Write-Error "Expected exactly one fat jar matching practitioner-taxonomy-repair-*-jar-with-dependencies.jar in target\, found $($jarCandidates.Count). Did 'mvn clean package' produce a stale or duplicate jar?"
+    exit 1
+}
+$jar     = $jarCandidates[0].FullName
+$jarName = $jarCandidates[0].Name
+Write-Host "Discovered jar: $jarName" -ForegroundColor Cyan
 
 # ============================================================
 # Stage zip contents
@@ -50,8 +58,8 @@ Write-Host "Staging deployment package..." -ForegroundColor Cyan
 if (Test-Path $STAGE_DIR) { Remove-Item $STAGE_DIR -Recurse -Force }
 New-Item -Path $STAGE_DIR -ItemType Directory | Out-Null
 
-# Fat jar
-Copy-Item $jar "$STAGE_DIR\practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar"
+# Fat jar -- preserve the discovered filename so it tracks the pom version.
+Copy-Item $jar "$STAGE_DIR\$jarName"
 
 # Properties template -- pulled from git HEAD (the canonical in-repo version
 # with YOUR_* placeholders), NOT from the working tree. The working tree file

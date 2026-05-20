@@ -24,7 +24,7 @@ The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could 
 
 ### Install from the release zip (recommended)
 
-1. Download `practitioner_taxonomy_repair_v1.1.0.zip` from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it (e.g., into `C:\Tools\Practitioner_Taxonomy_Repair`).
+1. Download `practitioner_taxonomy_repair_v1.2.0.zip` from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it (e.g., into `C:\Tools\Practitioner_Taxonomy_Repair`).
 2. Edit the three `db.*` lines in `PractitionerTaxonomyRepair.properties` (placeholder `YOUR_*` tokens).
 3. Run the installer, supplying only your loader install path:
 
@@ -43,7 +43,7 @@ sqlcmd -S <server> -d <database> -U <user> -P <pwd> -i sql/create_cpe_repair_obj
 mvn clean package -DskipTests
 ```
 
-Maven produces `target/practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` and copies the properties template next to it. Edit the properties file to fill in real `db.url` / `db.user` / `db.password`, then copy the call folder onto your loader install:
+Maven produces `target/practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar` and copies the properties template next to it. Edit the properties file to fill in real `db.url` / `db.user` / `db.password`, then copy the call folder onto your loader install:
 
 ```
 calls/practitioner_taxonomy_repair/  ->  <install>/Claim_Provider_Data_Loader/practitioner_taxonomy_repair/
@@ -55,7 +55,7 @@ Building requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn in
 
 ```bash
 # 1. Stage corrections (defaults: every practitioner with NPPES-source taxonomies)
-java -jar target/practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar
+java -jar target/practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar
    -> BATCH_ID=7
 
 # 2. Verify SOAP in LOG_ONLY mode
@@ -78,7 +78,7 @@ Two mechanisms, depending on whether your scope is a fixed list or a SQL filter:
 ```bash
 echo 1003008574 > npis.txt
 echo 1234567890 >> npis.txt
-java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar --npi-file=npis.txt --dry-run
+java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar --npi-file=npis.txt --dry-run
 ```
 
 **Custom SQL** — set `db.npi_query` in `PractitionerTaxonomyRepair.properties` to a `SELECT` that returns one column of NPIs. Used verbatim (no schema substitution), so qualify tables explicitly. Useful for a `cpe_load.load_run` bug-window filter without writing a file first:

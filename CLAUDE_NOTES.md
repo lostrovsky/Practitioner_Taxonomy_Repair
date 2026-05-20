@@ -95,7 +95,7 @@ Practitioner_Taxonomy_Repair/
 ## CLI
 
 ```bash
-java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar \
+java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar \
     [--log-output=both|file|console] \
     [--properties-file=<path>] \
     [--npi-file=<path>] \
@@ -115,7 +115,7 @@ java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar \
 
 ```bash
 # 1. Stage the corrections
-java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar
+java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar
    -> Repair batch 7 staged. Run the loader with --RUN_ID=7
    -> BATCH_ID=7
 
