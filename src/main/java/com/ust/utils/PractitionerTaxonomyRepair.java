@@ -44,7 +44,12 @@ import java.util.logging.Logger;
  *   --log-output=both|file|console     (default: both)
  *   --properties-file=<path>            (default: <jar-dir>/PractitionerTaxonomyRepair.properties)
  *   --npi-file=<path>                   (optional: text file with one NPI per line; lines starting with # are comments;
- *                                                   if omitted, all practitioners with any NPPES-source taxonomy are processed)
+ *                                                   if omitted, the tool runs the auto-derive query -- by default
+ *                                                   SELECT DISTINCT npi FROM <master>.practitioner_taxonomy
+ *                                                   WHERE taxonomy_source = 'NPPES'. To override that default,
+ *                                                   set the db.npi_query property to a custom SELECT returning
+ *                                                   one column of NPIs (e.g. scoped to a bug-window load_run).
+ *                                                   --npi-file always wins over db.npi_query.)
  *   --description=<text>                (optional: stored on cpe_repair.batch.description for audit)
  *   --dry-run                           (optional: do everything except the final INSERTs; logs what would be staged)
  */
@@ -58,6 +63,7 @@ public class PractitionerTaxonomyRepair {
     private static String masterSchema;
     private static String repairSchema;
     private static String xrefSchema;
+    private static String npiQueryOverride;   // optional db.npi_query; null/blank => use built-in default
 
     public static void main(String[] args) {
         int exitCode = 0;
@@ -89,6 +95,9 @@ public class PractitionerTaxonomyRepair {
             dbManager.connect();
 
             // 1. Resolve target NPI list.
+            if (npiFile != null && npiQueryOverride != null) {
+                logger.warning("--npi-file is set; db.npi_query in the properties file will be ignored.");
+            }
             List<String> npis = (npiFile != null)
                     ? readNpiFile(npiFile)
                     : queryNpisWithNppesTaxonomies();
@@ -203,6 +212,10 @@ public class PractitionerTaxonomyRepair {
         validateSchemaName(masterSchema);
         validateSchemaName(repairSchema);
         validateSchemaName(xrefSchema);
+        // Optional verbatim SQL for the auto-derive path. Not validated -- operator-controlled
+        // trust boundary, same as the loader's db.query in the call folder. Ignored when --npi-file is passed.
+        String raw = config.get("db.npi_query");
+        npiQueryOverride = (raw == null || raw.isBlank()) ? null : raw.trim();
         logger.info("Properties loaded from: " + propsFile);
     }
 
@@ -221,8 +234,18 @@ public class PractitionerTaxonomyRepair {
     // Read paths -- all targeting cpe_master (read-only) and cpe_xref
     // ============================================================
     private static List<String> queryNpisWithNppesTaxonomies() throws SQLException {
-        String sql = "SELECT DISTINCT npi FROM " + masterSchema + ".practitioner_taxonomy " +
-                     "WHERE taxonomy_source = 'NPPES'";
+        String sql;
+        if (npiQueryOverride != null) {
+            sql = npiQueryOverride;
+            logger.info("Using custom NPI query from db.npi_query (expected to return one column of NPIs)");
+        } else {
+            sql = "SELECT DISTINCT npi FROM " + masterSchema + ".practitioner_taxonomy " +
+                  "WHERE taxonomy_source = 'NPPES'";
+            logger.info("Using built-in default NPI query (db.npi_query not set in properties)");
+        }
+        // Log the SQL itself so operators can see exactly what produced their NPI list.
+        // Trim very long custom queries to keep the log readable.
+        logger.info("NPI query: " + (sql.length() > 500 ? sql.substring(0, 500) + " ... [truncated]" : sql));
         Connection conn = dbManager.getConnection();
         List<String> npis = new ArrayList<>();
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {

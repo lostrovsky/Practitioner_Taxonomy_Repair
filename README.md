@@ -71,11 +71,23 @@ java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair \
 
 ### Restricting to specific NPIs
 
+Two mechanisms, depending on whether your scope is a fixed list or a SQL filter:
+
+**Explicit list** — a text file, one NPI per line, lines starting with `#` are comments:
+
 ```bash
 echo 1003008574 > npis.txt
 echo 1234567890 >> npis.txt
 java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar --npi-file=npis.txt --dry-run
 ```
+
+**Custom SQL** — set `db.npi_query` in `PractitionerTaxonomyRepair.properties` to a `SELECT` that returns one column of NPIs. Used verbatim (no schema substitution), so qualify tables explicitly. Useful for a `cpe_load.load_run` bug-window filter without writing a file first:
+
+```properties
+db.npi_query=SELECT DISTINCT pt.npi FROM cpe_master.practitioner_taxonomy pt JOIN cpe_load.<...> lr ON ... WHERE pt.taxonomy_source='NPPES' AND lr.run_date BETWEEN '<start>' AND '<end>'
+```
+
+`--npi-file` always wins over `db.npi_query`. When neither is set, the tool falls back to the built-in default (every practitioner with at least one `NPPES`-source taxonomy in `cpe_master`).
 
 `--dry-run` does everything except the final INSERTs and logs what would be staged. Use it before committing a large batch.
 

@@ -103,7 +103,11 @@ java -jar practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar \
     [--dry-run]
 ```
 
-- `--npi-file=<path>`: text file, one NPI per line; lines starting with `#` are comments. If omitted, defaults to "all practitioners with at least one NPPES-source taxonomy in `cpe_master.practitioner_taxonomy`."
+- `--npi-file=<path>`: text file, one NPI per line; lines starting with `#` are comments. If omitted, the tool runs the auto-derive query.
+- **Auto-derive query** (used when `--npi-file` is not passed):
+  - Default: `SELECT DISTINCT npi FROM <db.master.schema>.practitioner_taxonomy WHERE taxonomy_source = 'NPPES'`.
+  - Override: set `db.npi_query` in `PractitionerTaxonomyRepair.properties` to a `SELECT` returning one column of NPIs. Used verbatim (no schema substitution). Intended for a `cpe_load.load_run` bug-window filter so the operator doesn't have to materialize the list to a file first. `--npi-file` always wins over `db.npi_query`.
+  - Whichever query is used is logged on every run (first 500 chars; truncated if longer).
 - `--dry-run`: do everything except the final INSERTs. Logs what would be staged. Useful before committing a large batch.
 - `--description`: stored on `cpe_repair.batch.description` for audit.
 

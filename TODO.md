@@ -4,7 +4,9 @@
 
 - [ ] **Get HRP-correct `<maintenanceReasonCode>` values** for a taxonomy-overlay amend. Currently the template mirrors `PractitionerCreateReason / 1` from the existing amend call type, which is wrong for a non-create operation. Update `<codeSetName>` and `<codeEntry>` in `calls/practitioner_taxonomy_repair/practitioner_taxonomy_repair.properties` once known.
 - [ ] **Verify `<updateMode>REPLACE</updateMode>` semantics in HRP.** Should replace the practitioner's full taxonomy list with what we send. If HRP actually treats it as `MERGE` (i.e., adds without removing), the overlay won't fix bugs where the wrong primary needs to be demoted. Test on a single practitioner in dev first.
-- [ ] **Decide affected-practitioner scope.** Default behavior (no `--npi-file` flag) processes every practitioner in cpe_master with at least one `NPPES`-source taxonomy. Confirm that's the right set, or build an NPI list (e.g., load_run date filter) for a tighter scope.
+- [ ] **Decide affected-practitioner scope.** Default behavior (no `--npi-file` flag) processes every practitioner in cpe_master with at least one `NPPES`-source taxonomy. Confirm that's the right set, or scope it tighter. Two override mechanisms:
+  - `--npi-file=<path>` — explicit list, one NPI per line (`#` for comments).
+  - `db.npi_query` in `PractitionerTaxonomyRepair.properties` — custom SELECT returning one column of NPIs, applied verbatim. Useful for a load_run / bug-window filter without writing the list to a file first. `--npi-file` always wins over `db.npi_query`.
 
 ## Production setup
 
