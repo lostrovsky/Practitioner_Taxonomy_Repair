@@ -211,7 +211,8 @@ GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases
 | Tag | Date | Commit | Asset | Contents |
 |---|---|---|---|---|
 | `v1.0.0` | 2026-05-01 | `b7c60bc` | `practitioner_taxonomy_repair_v1.0.0.zip` | Initial release. Jar, DDL, call folder, `build_package.ps1` + `INSTALL.txt`. **No `install.ps1`** — install was fully manual. |
-| `v1.1.0` (Latest) | 2026-05-19 | `72a94c6` | `practitioner_taxonomy_repair_v1.1.0.zip` (~1.5 MB, 9 entries) | Adds `install.ps1` (properties-as-source, idempotent, upgrade-safe). Hardens `build_package.ps1` packaging (see below). Java code unchanged; jar inside the zip is still `practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` (pom version unchanged). |
+| `v1.1.0` | 2026-05-19 | `72a94c6` | `practitioner_taxonomy_repair_v1.1.0.zip` (~1.5 MB, 9 entries) | Adds `install.ps1` (properties-as-source, idempotent, upgrade-safe). Hardens `build_package.ps1` packaging (see below). Java code unchanged; jar inside the zip is still `practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` (pom version unchanged). |
+| `v1.2.0` (Latest) | 2026-05-20 | `242dec0` | `practitioner_taxonomy_repair_v1.2.0.zip` (~1.5 MB, 9 entries) | Adds **`db.npi_query`** — operator-configurable verbatim SELECT for the auto-derive path (intended for `cpe_load.load_run` bug-window scoping; `--npi-file` still wins). Bumps pom to **1.2.0** (jar inside zip is now `practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar` — first honest artifact version). `build_package.ps1` jar path made version-agnostic (glob), so future pom bumps don't require touching the packaging script. |
 
 ### Packaging gotcha (caught during v1.1.0 build — do not regress)
 
@@ -237,4 +238,4 @@ just defense-in-depth against the AV race.
 
 ## State at Time of Notes
 
-Release `v1.1.0` shipped 2026-05-19 (commit `72a94c6`, marked Latest). v1.0.0 remains published and unchanged. DDL applied to dev DB only. Smoke tested end-to-end against NPI 1003008574 in `LOG_ONLY` mode. **Not yet run against a real-data batch in production** — the three blockers in TODO.md ("Blocking before first production run") still apply: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and confirming affected-practitioner scope.
+Release `v1.2.0` shipped 2026-05-20 (commit `242dec0`, marked Latest) -- adds `db.npi_query` so the auto-derive NPI scope is operator-configurable without code changes; pom bumped to 1.2.0 (first honest artifact version); packaging script jar path globbed. v1.1.0 and v1.0.0 remain published and unchanged. DDL applied to dev DB only. Smoke tested end-to-end against NPI 1003008574 in `LOG_ONLY` mode. **Not yet run against a real-data batch in production** — the three blockers in TODO.md ("Blocking before first production run") still apply: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and confirming affected-practitioner scope (now easier to scope tightly via `db.npi_query`).
