@@ -61,26 +61,12 @@ New-Item -Path $STAGE_DIR -ItemType Directory | Out-Null
 # Fat jar -- preserve the discovered filename so it tracks the pom version.
 Copy-Item $jar "$STAGE_DIR\$jarName"
 
-# Properties template -- pulled from git HEAD (the canonical in-repo version
-# with YOUR_* placeholders), NOT from the working tree. The working tree file
-# is normally --skip-worktree'd with real local credentials; reading HEAD
-# bypasses that without disturbing the working tree.
-$placeholderContent = & git -C $PROJECT_ROOT show "HEAD:PractitionerTaxonomyRepair.properties"
-if ($LASTEXITCODE -ne 0) {
-    Write-Error "Failed to read PractitionerTaxonomyRepair.properties from git HEAD"
-    Remove-Item $STAGE_DIR -Recurse -Force
-    exit 1
-}
-$joined = ($placeholderContent -join "`r`n") + "`r`n"
-[System.IO.File]::WriteAllText("$STAGE_DIR\PractitionerTaxonomyRepair.properties", $joined)
-
-# Sanity check: belt-and-suspenders -- refuse to ship if real creds somehow ended up here
-$propsContent = Get-Content "$STAGE_DIR\PractitionerTaxonomyRepair.properties" -Raw
-if ($propsContent -notmatch "YOUR_DB_PASSWORD") {
-    Write-Error "Staged properties file does NOT contain placeholder 'YOUR_DB_PASSWORD' -- refusing to package. Did the in-repo version get committed with real creds?"
-    Remove-Item $STAGE_DIR -Recurse -Force
-    exit 1
-}
+# NOTE on PractitionerTaxonomyRepair.properties:
+# As of v1.4.0 we do NOT ship this file in the release zip. install.ps1
+# generates it at the destination from install.config values. This eliminates
+# the duplicate config story (operator was previously editing two files) and
+# removes the chicken-and-egg around the working tree's skip-worktree'd local
+# real-creds copy. The maven build still copies it to target/ for dev use.
 
 # DDL
 New-Item -Path "$STAGE_DIR\sql" -ItemType Directory | Out-Null
@@ -95,14 +81,27 @@ if (Test-Path "$PROJECT_ROOT\deploy\INSTALL.txt") {
     Copy-Item "$PROJECT_ROOT\deploy\INSTALL.txt" "$STAGE_DIR\"
 }
 
-# Automated installer -- lands at the zip root so it sits beside the jar,
-# properties, sql\ and calls\ that it expects as siblings.
-if (-not (Test-Path "$PROJECT_ROOT\deploy\install.ps1")) {
-    Write-Error "deploy\install.ps1 not found -- cannot package without the installer"
+# Installer (install.ps1 + install.config). Both land at the zip root.
+# install.ps1 expects install.config as a sibling and reads it at run time.
+foreach ($f in @("install.ps1", "install.config")) {
+    $src = "$PROJECT_ROOT\deploy\$f"
+    if (-not (Test-Path $src)) {
+        Write-Error "deploy\$f not found -- cannot package without the installer"
+        Remove-Item $STAGE_DIR -Recurse -Force
+        exit 1
+    }
+    Copy-Item $src "$STAGE_DIR\$f"
+}
+
+# Orchestrator script -- run_repair.ps1 lives at repo root (mirrors the pipeline
+# convention of run_pipeline.ps1 at repo root). install.ps1 copies it into the
+# repair install dir with $SQLCMD substituted from install.config.
+if (-not (Test-Path "$PROJECT_ROOT\run_repair.ps1")) {
+    Write-Error "run_repair.ps1 not found at repo root -- cannot package without the orchestrator"
     Remove-Item $STAGE_DIR -Recurse -Force
     exit 1
 }
-Copy-Item "$PROJECT_ROOT\deploy\install.ps1" "$STAGE_DIR\"
+Copy-Item "$PROJECT_ROOT\run_repair.ps1" "$STAGE_DIR\"
 
 # Version metadata
 $versionContent = @(

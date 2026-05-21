@@ -2,93 +2,45 @@
 Practitioner Taxonomy Repair -- Install / Run
 ============================================================
 
-One-off remediation tool. Re-fetches NPPES taxonomies for practitioners
-loaded with the wrong primary by Claim_Provider_Data_Extractor versions
-before v1.4.1, stages a complete-overlay taxonomy list in a new
-cpe_repair schema, and pushes taxonomy-only amends to HRP via the
-existing Generic_HRP_WS_Call loader.
+One-off remediation tool. For each NPI it considers, re-fetches NPPES
+live and either:
+  * stages an amend (NPPES primary differs from master's primary, or
+    NPPES knows a code master doesn't), OR
+  * records status='skipped' (master already matches NPPES).
 
-Does NOT run as part of run_pipeline.ps1. Triggered manually.
+Runs out-of-band from the daily Claim Provider Data Pipeline. Installs
+as a sibling folder next to your existing Claim_Provider_Data_Extractor
+and Claim_Provider_Data_Loader.
 
 ============================================================
 PREREQUISITES
 ============================================================
-* Java 21 JRE or JDK on PATH (or via JAVA_HOME)
+* Java 21 JRE or JDK on PATH (or via JAVA_HOME).
 * SQL Server reachable, with cpe_master and cpe_xref schemas already
-  populated (i.e., the daily pipeline has been running)
-* Generic_HRP_WS_Call jar (generic-hrp-ws-call.jar) deployed at the
-  same install as your existing daily pipeline -- this tool reuses it
-* Claim_Provider_Data_Pipeline env.properties available (provides
-  ${WS_BASE_URL}, ${CONNECTOR_ADMIN_PASSWORD}, ${LOG_ONLY}, etc. for
-  the call folder)
-
-============================================================
-QUICK INSTALL (AUTOMATED) -- recommended
-============================================================
-install.ps1 does STEPS 2, 3 and 4 in one command (apply DDL,
-configure the tool, copy the call folder).
-
-The DB connection comes from PractitionerTaxonomyRepair.properties
--- the same file the Java tool reads -- so you only enter it once.
-
-Normal flow:
-
-  1. Extract the zip (STEP 1 below).
-  2. Edit the three db.* lines in PractitionerTaxonomyRepair.properties
-     (STEP 3 below) -- the tool needs them filled in to run anyway.
-  3. Run, supplying only your loader path:
-
-       cd C:\Tools\Practitioner_Taxonomy_Repair
-       .\install.ps1 -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
-
-install.ps1 parses db.url / db.user / db.password from the properties
-file, applies the DDL with them, and copies the call folder.
-
-You may instead pass DB values on the command line -- each one given
-overrides the matching properties value, and (if the file still has
-placeholders) is written into it, so you can skip step 2:
-
-    .\install.ps1 -SqlServer <server> -Database <db> ^
-                   -DbUser <user> -DbPassword <password> ^
-                   -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
-
-Optional flags:
-  -DbPort <n>       SQL Server port. Default 1433, or the port already
-                    embedded in db.url. Ignored for named instances.
-  -SqlcmdPath <p>   explicit path to sqlcmd.exe if not on PATH
-  -SkipDdl          do not apply the DDL (objects already exist)
-  -Force            overwrite an already-configured properties file
-                    with CLI values, and/or replace an existing call
-                    folder (the old one is backed up first)
-  -WhatIf           dry run -- show what would change, touch nothing
-
-Idempotent and upgrade-safe:
-  * The DDL guards every object, so re-running is harmless.
-  * The properties file is the source of truth: with no DB params on
-    the command line it is never modified. It is only written when
-    you pass DB params AND it still has placeholders (or you pass
-    -Force).
-  * An existing call folder (which may carry operator edits such
-    as the <maintenanceReasonCode> values) is NOT replaced unless
-    you pass -Force, and is backed up to a timestamped sibling
-    folder first.
-
-If you prefer to do it by hand, or install.ps1 reports a problem,
-follow STEPS 2-4 manually below. Then continue at STEP 5.
+  populated (i.e., the daily pipeline has been running).
+* An existing Claim Provider Data Pipeline install: specifically the
+  Claim_Provider_Data_Loader\generic-hrp-ws-call.jar must already be
+  deployed at <base>\Claim_Provider_Data_Loader\.
+* sqlcmd installed (path supplied via install.config SQLCMD_PATH).
+* PowerShell 5.1+ (Windows).
 
 ============================================================
 STEP 1: EXTRACT
 ============================================================
-Extract the release zip wherever you want this tool to live. e.g.:
+Extract the release zip to any temporary directory -- NOT on top of
+your existing pipeline install. The installer will create the actual
+install folder. Example:
 
-    C:\Tools\Practitioner_Taxonomy_Repair\
+    C:\temp\ptr_v1.4.0\
 
 Resulting layout:
 
-    practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar
-    PractitionerTaxonomyRepair.properties     (placeholder DB creds)
-    install.ps1                               (automated installer)
+    install.ps1                  (installer)
+    install.config               (you edit this in STEP 2)
+    INSTALL.txt                  (this file)
     version.txt
+    run_repair.ps1               (orchestrator; installer copies into repair folder)
+    practitioner-taxonomy-repair-<ver>-jar-with-dependencies.jar
     sql\
         create_cpe_repair_objects.sql
     calls\
@@ -96,145 +48,156 @@ Resulting layout:
             practitioner_taxonomy_repair.properties
             practitioner_taxonomy_repair.report.json
             practitioner_taxonomy_repair.sql.json
-    INSTALL.txt   (this file)
 
 ============================================================
-STEP 2: APPLY DDL TO YOUR DATABASE (one time)
+STEP 2: EDIT install.config
 ============================================================
-Creates the cpe_repair schema, 3 tables, 1 TVF, 1 stored procedure.
-Idempotent -- safe to re-run.
+Open install.config in the extracted temp directory and fill in:
 
-    sqlcmd -S <server> -d <database> -U <user> -P <password> ^
-           -i sql\create_cpe_repair_objects.sql
+  DB_URL                      JDBC connection string for SQL Server
+  DB_USER, DB_PASSWORD        DB credentials (must have SELECT on cpe_master.*
+                              and cpe_xref.taxonomy, INSERT/UPDATE on cpe_repair.*)
+  WS_BASE_URL                 HRP connector base URL (no trailing slash)
+  CONNECTOR_ADMIN_PASSWORD    Password for the connector_admin WS user
+  LOG_ONLY                    true (recommended for first run) or false
+  WS_RETRY_*                  retry settings (defaults are fine)
+  SQLCMD_PATH                 full path to sqlcmd.exe
 
-Verify with:
+Optional:
+  NPI_QUERY                   custom SELECT for the auto-derive path
+                              (returns one column of NPIs; verbatim)
+  DB_MASTER_SCHEMA / DB_REPAIR_SCHEMA / DB_XREF_SCHEMA
+                              schema overrides (defaults: cpe_master / cpe_repair / cpe_xref)
 
-    SELECT name FROM sys.schemas WHERE name = 'cpe_repair';
-    SELECT name FROM sys.tables  WHERE schema_id = SCHEMA_ID('cpe_repair');
-
-You should see schema 'cpe_repair' and tables 'batch',
-'practitioner_repair', 'practitioner_taxonomy'.
-
-============================================================
-STEP 3: CONFIGURE THE TOOL
-============================================================
-Edit PractitionerTaxonomyRepair.properties in the install dir:
-
-    db.url=jdbc:sqlserver://<host>:1433;databaseName=<db>;trustServerCertificate=true;
-    db.user=<user>
-    db.password=<password>
-
-(Schema lines below are typically left at defaults: cpe_master, cpe_repair, cpe_xref.)
+Tip: most values can be copy-pasted from your daily pipeline's
+env.properties.
 
 ============================================================
-STEP 4: COPY CALL FOLDER TO YOUR LOADER INSTALL
+STEP 3: RUN install.ps1
 ============================================================
-The existing Generic_HRP_WS_Call loader (the same jar your daily
-pipeline already uses) needs to find the new call folder when invoked.
-Copy:
+From the extracted temp directory:
 
-    From:  <this install>\calls\practitioner_taxonomy_repair\
-    To:    <existing install>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\
+    cd C:\temp\ptr_v1.4.0
+    .\install.ps1
+
+You'll be prompted for:
+
+  Installation directory      The BASE folder that already contains
+                              Claim_Provider_Data_Extractor\ and
+                              Claim_Provider_Data_Loader\. The installer
+                              will create Practitioner_Taxonomy_Repair\
+                              as a sibling.
+  (if folder exists)          Confirm overwrite (y/N).
+  Apply DDL now?              y to run sql\create_cpe_repair_objects.sql
+                              against your DB now; N to do it manually later.
+
+The installer:
+  * Creates <base>\Practitioner_Taxonomy_Repair\
+  * Copies the jar, run_repair.ps1, install.ps1, install.config, version.txt,
+    sql\create_cpe_repair_objects.sql there
+  * GENERATES <base>\Practitioner_Taxonomy_Repair\env.properties from
+    install.config (used by the loader at run time)
+  * GENERATES <base>\Practitioner_Taxonomy_Repair\PractitionerTaxonomyRepair.properties
+    from install.config (used by the repair jar directly)
+  * Substitutes SQLCMD_PATH into the deployed run_repair.ps1
+  * Copies the call folder to
+    <base>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\
+    (backing up any existing one to a timestamped sibling first)
+  * Optionally applies the DDL via sqlcmd
 
 ============================================================
-STEP 5: STAGE A REPAIR BATCH
+STEP 4: RUN THE REPAIR
 ============================================================
-"Dry run" first -- queries the DB to count target practitioners and
-calls NPPES, but does NOT insert anything:
+Everything from here on is operator-facing -- run from the installed
+repair folder, not the extracted temp.
 
-    java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar --dry-run
+    cd <base>\Practitioner_Taxonomy_Repair
 
-When you're ready to stage for real:
+Typical first run (LOG_ONLY mode -- inspect SOAP envelopes; no HRP calls):
 
-    java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar ^
-         --description="Pilot repair batch"
+    .\run_repair.ps1 -NpiFile pilot.txt -DryRun
+        -> jar stages nothing, logs what it would stage. No loader call.
 
-The tool prints "BATCH_ID=<n>" at the end. Note that number for the
-next step.
+    .\run_repair.ps1 -NpiFile pilot.txt
+        -> jar stages a batch. Loader runs (LOG_ONLY honors env.properties).
+           Captures BATCH_ID, then invokes the loader. Watch the SOAP in the
+           log; verify it looks right.
 
-To restrict to specific NPIs (e.g., a small pilot first):
+When ready for real:
 
-    1. Create a text file with one NPI per line (lines starting with
-       # are comments)
-    2. Pass --npi-file=<path>:
+    # Set LOG_ONLY=false in env.properties (or pass -LogOnlyOverride for one run)
+    .\run_repair.ps1 -NpiFile pilot.txt
+        -> Real amends pushed to HRP. Spot-check the affected practitioners
+           in HRP.
 
-       java -jar ... --npi-file=pilot_npis.txt --description="Pilot"
+For the full batch (no --npi-file -> auto-derive query, or NPI_QUERY override
+if set in install.config):
+
+    .\run_repair.ps1 -Description "Production repair batch"
+
+Resume mode (re-run only the loader against an existing batch_id; useful
+after a mid-run loader failure):
+
+    .\run_repair.ps1 -BatchId 7
 
 ============================================================
-STEP 6: VERIFY THE STAGED BATCH (optional but recommended)
+STEP 5: VERIFY
 ============================================================
-    SELECT batch_id, COUNT(*) AS practitioners
+After a real (non-LOG_ONLY) run:
+
+    SELECT status, COUNT(*)
     FROM cpe_repair.practitioner_repair
     WHERE batch_id = <n>
-    GROUP BY batch_id;
+    GROUP BY status;
 
-    -- Sample rows the loader will see:
-    SELECT * FROM cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id(<n>);
+Expected: 'loaded' for everything the loader pushed; 'skipped' for
+practitioners that already matched NPPES (no amend was needed); 'failed'
+for any HRP rejections (investigate via error_message).
 
-============================================================
-STEP 7: PUSH AMENDS TO HRP
-============================================================
-First, verify the SOAP envelopes look right with LOG_ONLY=true. The
-loader's --LOG_ONLY=true flag overrides whatever's in env.properties
-for this single run.
-
-    cd <existing install>\Claim_Provider_Data_Loader\
-    java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair ^
-         --RUN_ID=<batch_id> ^
-         --LOG_ONLY=true ^
-         --env-file=<existing install>\Claim_Provider_Data_Pipeline\env.properties
-
-Inspect the log. If happy, drop the LOG_ONLY flag and run for real:
-
-    java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair ^
-         --RUN_ID=<batch_id> ^
-         --env-file=<existing install>\Claim_Provider_Data_Pipeline\env.properties
-
-============================================================
-STEP 8: VERIFY
-============================================================
-    SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair
-    WHERE batch_id = <n> GROUP BY status;
-
-All rows should be 'loaded'. Investigate any 'failed' via the
-error_message column. Spot-check 5-10 random repaired practitioners
-in HRP UI/API to confirm the primary taxonomy now matches NPPES.
+Spot-check 5-10 random repaired practitioners in HRP -- confirm primary
+taxonomy now matches NPPES live.
 
 ============================================================
 TROUBLESHOOTING
 ============================================================
-* "BUILD FAILURE: Could not find artifact com.ust.utils:claim-
-  provider-data-extractor:1.0.0" -- the repair tool was built against
-  the extractor jar in local m2. If you get this on a different
-  machine and want to rebuild, run "mvn install -DskipTests" from the
-  Claim_Provider_Data_Extractor project FIRST. For run-only
-  deployments (using the pre-built jar from this zip), this isn't an
-  issue.
-* NPPES timeouts -- the tool calls NPPES sequentially. For very large
-  batches, expect ~500ms per NPI. A batch of 1000 NPIs can take 8-10
-  minutes.
-* "BATCH_ID=" not printed -- check the log file (UISequenceCall... no,
-  wait: PractitionerTaxonomyRepair.log) for stack traces. Common
-  causes: bad DB creds, NPPES unreachable, cpe_repair schema missing.
-* Loader returns 401/403 -- the env.properties WS credentials are
-  wrong, or HRP is rejecting the maintenanceReasonCode. The current
-  template uses "PractitionerCreateReason / 1" which may need to be
-  updated to a HRP-correct amend reason code -- see TODO.md.
+* "install.config not found" -- you ran install.ps1 from outside the
+  extracted directory. cd into the extracted folder first.
+
+* "Loader install not found at: <base>\Claim_Provider_Data_Loader" --
+  the path you supplied as installation directory doesn't contain the
+  existing pipeline siblings. This installer is an add-on; install the
+  daily pipeline first, or point at the correct base directory.
+
+* "Repair jar not found" or "Loader jar not found" from run_repair.ps1
+  -- run install.ps1 first. run_repair.ps1 expects to live in the
+  installed Practitioner_Taxonomy_Repair folder next to the jar, with
+  ..\Claim_Provider_Data_Loader\generic-hrp-ws-call.jar reachable.
+
+* "Database connection failed (PASSWORD APPEARS TO BE EXPIRED ...)" --
+  rotate the DB password on SQL Server, then update install.config and
+  re-run install.ps1 to regenerate env.properties + the repair jar's
+  properties file with the new password.
+
+* Loader returns 401/403 -- the connector_admin WS password is wrong,
+  or HRP is rejecting the <maintenanceReasonCode>. The current template
+  uses 'PractitionerCreateReason / 1' which is a known TODO for a
+  taxonomy-overlay amend; see TODO.md.
+
+* NPPES timeouts -- sequential lookups at ~500ms each. A 1000-NPI batch
+  takes 8-10 minutes; nothing's wrong if the jar is slow.
 
 ============================================================
 ROLLBACK / UNINSTALL
 ============================================================
-1. Delete the install directory.
-2. Delete the call folder copy at
-   <existing install>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\
+1. Delete <base>\Practitioner_Taxonomy_Repair\
+2. Delete <base>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\
+   (and the timestamped .bak sibling if you don't need it)
 3. (Optional) Drop the cpe_repair schema:
        DROP SCHEMA cpe_repair;
    (Will fail if the schema contains objects -- drop those first or
    leave the schema in place; it's harmless.)
 
 cpe_master, cpe_load, cpe and the daily pipeline are untouched
-throughout. This tool reads cpe_master.practitioner and
-cpe_master.practitioner_taxonomy (read-only) and writes only to
-cpe_repair.
-
+throughout. This tool reads cpe_master and cpe_xref (read-only) and
+writes only to cpe_repair.
 ============================================================

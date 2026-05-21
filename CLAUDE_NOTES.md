@@ -76,13 +76,20 @@ DDL lives at `sql/create_cpe_repair_objects.sql`. Idempotent (`IF NOT EXISTS` on
 ```
 Practitioner_Taxonomy_Repair/
 ├── pom.xml
-├── PractitionerTaxonomyRepair.properties      (template, ships with YOUR_* placeholder DB creds)
+├── PractitionerTaxonomyRepair.properties      (DEV ONLY: local working tree skip-worktree'd with real creds;
+│                                                git HEAD has placeholders; NOT shipped in zip since v1.4.0
+│                                                -- install.ps1 generates it from install.config)
+├── run_repair.ps1                              (orchestrator: stages via jar, captures BATCH_ID, invokes loader;
+│                                                mirrors pipeline's run_pipeline.ps1; ships in zip; install.ps1
+│                                                copies into the repair install dir with $SQLCMD substituted)
 ├── CLAUDE.md, CLAUDE_NOTES.md, TODO.md, README.md
 ├── .claude/settings.local.json
 ├── .gitignore
 ├── deploy/
 │   ├── build_package.ps1                       (build machine: produces the release zip)
-│   ├── install.ps1                             (operator: automates INSTALL.txt steps 2-4; ships at zip root)
+│   ├── install.ps1                             (pipeline-style installer; reads install.config sibling)
+│   ├── install.config                          (operator-edited template; values feed env.properties +
+│   │                                            PractitionerTaxonomyRepair.properties generation)
 │   └── INSTALL.txt                             (manual runbook; bundled into the zip)
 ├── sql/
 │   └── create_cpe_repair_objects.sql           (idempotent; run once per environment)
@@ -191,42 +198,88 @@ Sanity-checked after run: `cpe_load.load_run` latest run_id unchanged; `cpe_mast
 - **`<maintenanceReasonCode>`** in the call folder template is still `PractitionerCreateReason / 1` (mirrored from existing amend template). HRP-correct amend reason for a taxonomy overlay is a long-standing TODO carried over from the Pipeline project. Adjust in `calls/practitioner_taxonomy_repair/practitioner_taxonomy_repair.properties` once those values are known.
 - **`<updateMode>REPLACE</updateMode>`** in the `<specialties>` block enforces complete-overlay semantics. The existing daily-pipeline `practitioner_amends` uses `MERGE`. Verify HRP behavior matches expectations.
 
-## Installer
+## Installer + Orchestrator (since v1.4.0)
 
-`deploy/install.ps1` automates INSTALL.txt steps 2-4 (apply DDL, configure,
-copy call folder) into one command. It is staged at the zip *root* by
-`build_package.ps1` so it sits beside the jar / properties / `sql\` / `calls\`
-it expects as siblings.
+Pipeline-style install mirroring `Claim_Provider_Data_Pipeline\deploy\install.ps1`.
+Single source of truth for install-time configuration is `install.config`; the
+operator edits that once, then `install.ps1` generates every per-component
+config file from it. No CLI param explosion.
 
-**DB connection source of truth = `PractitionerTaxonomyRepair.properties`.**
-The four DB params (`-SqlServer/-Database/-DbUser/-DbPassword`) are optional;
-only `-LoaderInstallPath` is mandatory. The installer parses `db.url` (host,
-port, databaseName -- handles `host`, `host:port`, `host,port`,
-`host\instance`, `host\instance:port`), `db.user`, `db.password` from the
-file. Any CLI DB param overrides the matching field. Rationale: the operator
-must fill that file in for the Java tool to run anyway, so requiring the same
-creds again on the installer command line was pure duplication. (Considered
-and rejected a separate answer file -- it would put creds in two places.)
+**`install.config`** (sibling of `install.ps1` in the release zip) holds:
+`DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`,
+`LOG_ONLY`, `WS_RETRY_*`, `SQLCMD_PATH`, optional `NPI_QUERY`, optional
+schema overrides. Trimmed from the pipeline's install.config -- no
+`EMAIL_*`/`SMTP_*`/`AUTO_RESUME_FAILED` (out of scope for a one-off
+remediation tool); no `INTEGRATION_PASSWORD` (this call type uses
+`connector_admin` only).
 
-Upgrade-safety follows the "Mindful File Replacement" doctrine:
+**`install.ps1`** (interactive: prompts for installation directory and DDL y/N):
+1. Reads + validates `install.config` (sibling).
+2. Verifies `<base>\Claim_Provider_Data_Loader\` exists (add-on, not stand-alone).
+3. Prompts `y/N` if `<base>\Practitioner_Taxonomy_Repair\` already exists.
+4. Creates the repair sibling folder.
+5. Copies: jar (glob-discovered, version-agnostic), `install.ps1` self, `install.config` self,
+   `version.txt`, `sql\create_cpe_repair_objects.sql`.
+6. Copies `run_repair.ps1` with `$SQLCMD = "..."` line regex-substituted from
+   `SQLCMD_PATH` (same pattern as pipeline's `run_pipeline.ps1` substitution).
+7. **Generates `env.properties`** from `install.config` (DB_URL/USER/PASSWORD,
+   WS_BASE_URL, CONNECTOR_ADMIN_PASSWORD, LOG_ONLY, WS_RETRY_*). This is the
+   file the loader consumes via `--env-file` at run time; the call folder's
+   `${...}` references resolve against it.
+8. **Generates `PractitionerTaxonomyRepair.properties`** from `install.config`
+   (concrete `db.url`/`db.user`/`db.password`; schema defaults or overrides;
+   `db.npi_query` only if NPI_QUERY is set). This is the file the repair jar
+   reads directly; no `${...}` substitution.
+9. Copies the call folder to `<base>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\`,
+   backing up any existing one to a timestamped `.bak.<ts>` sibling first.
+10. Optional DDL apply (y/N prompt; uses sqlcmd from `SQLCMD_PATH`).
 
-- **DDL**: idempotent already; the installer just runs it with the resolved
-  creds (`-SkipDdl` to skip, `-WhatIf` for a dry run).
-- **`PractitionerTaxonomyRepair.properties`**: it is the source of truth, so
-  with no DB params on the command line it is **never modified**. It is only
-  rewritten (targeted: only `db.url`/`db.user`/`db.password`; comments and
-  schema lines byte-identical) when the operator passes DB params AND the file
-  still has `YOUR_*` placeholders, or passes `-Force`.
-- **Call folder**: never silently overwritten. A fresh target is copied; an
-  existing one (which may carry the operator's `<maintenanceReasonCode>` edit)
-  is only replaced with `-Force`, and is moved to a timestamped
-  `practitioner_taxonomy_repair.bak.<ts>` sibling first.
+**`run_repair.ps1`** (lives in the installed repair folder; mirrors
+`run_pipeline.ps1` structure):
+1. Concurrency lock (`repair.lock`), transcript log (`repair_<ts>.log`), prior-log
+   archive-to-`logs/`.
+2. Validate prerequisites (jar via glob in script dir; loader jar at
+   `..\Claim_Provider_Data_Loader\generic-hrp-ws-call.jar`; env.properties;
+   call folder; sqlcmd; -NpiFile path; -BatchId numeric).
+3. Parse env.properties for DB_URL/USER/PASSWORD + LOG_ONLY; live DB
+   connectivity check with hint-tagged failure messages (expired, login
+   failed, server unreachable, db not found).
+4. **STEP 2: stage** -- `java -jar <repair jar> [--npi-file=...] [--description=...] [--dry-run]`.
+   Captures `BATCH_ID=<n>` from stdout. Handles `--dry-run` (exits with summary,
+   no loader call) and the "nothing to amend" success-no-op case (jar exits 0
+   without emitting BATCH_ID).
+5. **STEP 3: load** -- `java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair
+   --RUN_ID=<batch> --env-file=...\env.properties`. Honors LOG_ONLY from
+   env.properties; `-LogOnlyOverride` switch passes `--LOG_ONLY=true` for one run.
+   Loader failure prints a `.\run_repair.ps1 -BatchId <n>` resume hint.
+6. Resume mode (`-BatchId <n>`) skips Step 2 and re-invokes the loader against
+   an existing batch. TVF filter (`status NOT IN ('loaded','skipped')`) means
+   already-completed rows complete instantly.
+7. End-of-run summary lines (batch_id, elapsed, log file path, per-status
+   counts queried from `cpe_repair.practitioner_repair`).
 
-Design tradeoff: the call folder is replaced wholesale (with backup) rather
-than per-line variable-merged. Per-line preservation of a multi-line SOAP
-template is fragile and not worth it for a one-off remediation tool; the
-timestamped backup keeps operator edits recoverable, which satisfies the
-"mindful, recoverable, loudly reported" intent.
+**Rationale for the rewrite (v1.4.0):** the v1.1.0-v1.3.0 installer was
+self-contained -- operator pre-extracted, pre-edited a properties file,
+ran install.ps1 from there. That left install-location decisions to the
+operator and didn't match the rest of this ecosystem. v1.4.0 mirrors the
+pipeline pattern so the two tools install and run the same way.
+
+What v1.4.0 dropped from v1.3.0:
+- `-LoaderInstallPath` CLI param (the installer now derives loader path
+  from the target directory it prompts for).
+- Targeted-preserve logic on `PractitionerTaxonomyRepair.properties` (the
+  file is now wholesale-generated from install.config every install; the
+  "preserve real creds" concern is solved by NOT shipping the file in the
+  zip and re-deriving it from install.config every time).
+- `-WhatIf`/`-Force`/`-SkipDdl` switches (replaced by the interactive
+  y/N prompts the pipeline pattern uses).
+
+What v1.4.0 retained:
+- Call folder backup-then-replace (the `<maintenanceReasonCode>` operator-edit
+  case is still real and still respected -- existing call folder moved to
+  `.bak.<ts>` sibling before overwrite).
+- Robust self-verifying packaging in `build_package.ps1` (the v1.1.0
+  Compress-Archive/Defender drop bug fix stays).
 
 ## Releases
 
@@ -237,7 +290,8 @@ GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases
 | `v1.0.0` | 2026-05-01 | `b7c60bc` | `practitioner_taxonomy_repair_v1.0.0.zip` | Initial release. Jar, DDL, call folder, `build_package.ps1` + `INSTALL.txt`. **No `install.ps1`** — install was fully manual. |
 | `v1.1.0` | 2026-05-19 | `72a94c6` | `practitioner_taxonomy_repair_v1.1.0.zip` (~1.5 MB, 9 entries) | Adds `install.ps1` (properties-as-source, idempotent, upgrade-safe). Hardens `build_package.ps1` packaging (see below). Java code unchanged; jar inside the zip is still `practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` (pom version unchanged). |
 | `v1.2.0` | 2026-05-20 | `242dec0` | `practitioner_taxonomy_repair_v1.2.0.zip` (~1.5 MB, 9 entries) | Adds **`db.npi_query`** — operator-configurable verbatim SELECT for the auto-derive path (intended for `cpe_load.load_run` bug-window scoping; `--npi-file` still wins). Bumps pom to **1.2.0** (jar inside zip is now `practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar` — first honest artifact version). `build_package.ps1` jar path made version-agnostic (glob), so future pom bumps don't require touching the packaging script. |
-| `v1.3.0` (Latest) | 2026-05-21 | `8875334` | `practitioner_taxonomy_repair_v1.3.0.zip` (~1.5 MB, 9 entries, jar `1.3.0`) | **Behavior change: diff-and-skip per NPI.** Tool no longer unconditionally stages amends. Compares NPPES vs master per NPI; if `master.codes ⊇ NPPES.codes` AND `master.is_primary=1 code == NPPES.primary code`, records `status='skipped'` (with reason in `error_message`) instead of staging. Mismatch path builds merge: primary=NPPES primary; secondary = first non-primary NPPES code (tool's convention — NPPES has no native secondary); others = remaining NPPES + master-only, deduped. TVF filter widened to `status NOT IN ('loaded','skipped')`. Pom bumped to 1.3.0. The v1.4.1 verification case (NPI 1003008574) now produces a `skipped` row instead of an amend (correct under new policy). |
+| `v1.3.0` | 2026-05-21 | `8875334` | `practitioner_taxonomy_repair_v1.3.0.zip` (~1.5 MB, 9 entries, jar `1.3.0`) | **Behavior change: diff-and-skip per NPI.** Tool no longer unconditionally stages amends. Compares NPPES vs master per NPI; if `master.codes ⊇ NPPES.codes` AND `master.is_primary=1 code == NPPES.primary code`, records `status='skipped'` (with reason in `error_message`) instead of staging. Mismatch path builds merge: primary=NPPES primary; secondary = first non-primary NPPES code (tool's convention — NPPES has no native secondary); others = remaining NPPES + master-only, deduped. TVF filter widened to `status NOT IN ('loaded','skipped')`. Pom bumped to 1.3.0. The v1.4.1 verification case (NPI 1003008574) now produces a `skipped` row instead of an amend (correct under new policy). |
+| `v1.4.0` (Latest) | 2026-05-21 | TBD | `practitioner_taxonomy_repair_v1.4.0.zip` (jar still `1.3.0` — Java unchanged) | **Install + orchestration redesigned to mirror the daily pipeline.** New `run_repair.ps1` orchestrator (concurrency lock, transcript log, env.properties parse, DB check, stage → capture BATCH_ID → loader; `-BatchId` resume mode). New `install.config` single-source-of-truth template; `install.ps1` rewritten pipeline-style (prompts for installation directory, creates `<base>\Practitioner_Taxonomy_Repair\` sibling, generates `env.properties` + `PractitionerTaxonomyRepair.properties` from install.config, copies call folder to loader, optional DDL apply). The v1.1.0-v1.3.0 `-LoaderInstallPath` CLI flow is gone; `PractitionerTaxonomyRepair.properties` no longer shipped (generated by installer). Pom stays 1.3.0 (no Java change). |
 
 ### Packaging gotcha (caught during v1.1.0 build — do not regress)
 
@@ -263,4 +317,4 @@ just defense-in-depth against the AV race.
 
 ## State at Time of Notes
 
-Release `v1.3.0` shipped 2026-05-21 (commit `8875334`, marked Latest) -- behavior change: per-NPI diff-and-skip; an amend is now staged only when master actually differs from NPPES; matches are recorded with status='skipped' for audit. Pom bumped to 1.3.0. v1.0.0/v1.1.0/v1.2.0 remain published and unchanged. DDL applied to dev DB only. **The new diff path has only been compile-verified, not run against a database** -- next smoke test should use a deliberately-mismatched NPI (one where master still shows a v1.4.0-buggy primary) to exercise the stage-an-amend branch end-to-end. The previous verification case (NPI 1003008574) now produces a `skipped` row instead of an amend (correct under the new policy, but it means that case no longer re-verifies the SOAP-amend path). The three blockers in TODO.md remain: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and affected-practitioner scope (now de-risked since scope can no longer cause redundant amends).
+Release `v1.4.0` shipped 2026-05-21 (marked Latest) -- install + orchestration redesigned to mirror the daily pipeline pattern. Pipeline-style `install.config` + interactive `install.ps1` create a `Practitioner_Taxonomy_Repair\` sibling folder next to the existing extractor/loader, with its own `env.properties` and a `run_repair.ps1` orchestrator (same shape as `run_pipeline.ps1`) that handles both the stage step and the loader call. Pom stays 1.3.0 -- no Java change; the diff-and-skip behavior shipped in v1.3.0 is unchanged. v1.0.0-v1.3.0 remain published and unchanged. DDL applied to dev DB only. **Not yet smoke-tested with a real install.** Next step is to install into a dev environment and exercise `run_repair.ps1` end-to-end against a deliberately-mismatched NPI (still need one where master shows a v1.4.0-buggy primary to exercise the stage-an-amend branch). The three blockers in TODO.md remain: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and affected-practitioner scope (de-risked since v1.3.0).

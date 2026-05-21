@@ -1,308 +1,329 @@
 # ============================================================
-# Practitioner Taxonomy Repair -- automated installer
-# ============================================================
-# Automates INSTALL.txt steps 2-4 (apply DDL, configure DB creds,
-# copy the call folder to your loader install) into one command.
-#
-# Run this FROM the extracted release zip directory -- it expects
-# the jar, PractitionerTaxonomyRepair.properties, sql\ and calls\
-# as siblings of this script.
-#
-# DB connection is read from PractitionerTaxonomyRepair.properties
-# (db.url / db.user / db.password) -- the same file the Java tool
-# uses. So the normal flow is: fill in that file once, then:
-#
-#   .\install.ps1 -LoaderInstallPath 'C:\Tools\Claim_Provider_Data_Loader'
-#
-# Any of -SqlServer / -Database / -DbUser / -DbPassword you DO pass
-# override the corresponding value from the properties file (and, if
-# the file still has placeholders, get written into it).
-#
-# Idempotent and upgrade-safe:
-#   * DDL is idempotent (the .sql guards every object).
-#   * The properties file is only modified if you pass DB params AND
-#     it still has placeholders (or you pass -Force). A file you've
-#     already filled in is treated as the source of truth, untouched.
-#   * An existing (possibly operator-customized) call folder is backed
-#     up to a timestamped sibling before replacement, and only replaced
-#     when -Force is passed.
-#
-# Supports -WhatIf for a no-side-effect dry run.
+# Practitioner Taxonomy Repair -- Installer
+# Creates the Practitioner_Taxonomy_Repair sibling folder alongside the
+# existing Claim_Provider_Data_Extractor / Claim_Provider_Data_Loader,
+# deploys components, generates env.properties + PractitionerTaxonomyRepair.properties
+# from install.config, copies the call folder into the loader, optionally applies DDL.
+# Mirrors the install pattern from Claim_Provider_Data_Pipeline.
 # ============================================================
 
-[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
-[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'DbPassword',
-    Justification = 'The DB password must be passed to sqlcmd -P and written verbatim into ' +
-    'PractitionerTaxonomyRepair.properties (db.password=) for the Java tool to connect. It ends up ' +
-    'cleartext regardless; SecureString would add ceremony without protection and is inconsistent ' +
-    'with the documented INSTALL.txt usage and the project sqlcmd -P convention.')]
-param(
-    [Parameter(Mandatory = $true)] [string] $LoaderInstallPath,
+$ErrorActionPreference = "Stop"
+$INSTALL_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-    # All optional -- fall back to PractitionerTaxonomyRepair.properties.
-    [string] $SqlServer,
-    [string] $Database,
-    [string] $DbUser,
-    [string] $DbPassword,
+# ============================================================
+# Read install.config
+# ============================================================
+$configFile = Join-Path $INSTALL_DIR "install.config"
+if (-not (Test-Path $configFile)) {
+    Write-Error "install.config not found. It should be in the same folder as install.ps1."
+    exit 1
+}
 
-    [int]    $DbPort    = 1433,
-    [string] $SqlcmdPath,
-    [switch] $SkipDdl,
-    [switch] $Force
-)
+$config = @{}
+Get-Content $configFile | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+        $key = $line.Substring(0, $line.IndexOf("="))
+        $value = $line.Substring($line.IndexOf("=") + 1)
+        $config[$key] = $value
+    }
+}
 
-$ErrorActionPreference = 'Stop'
-
-function Write-Step  ($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
-function Write-Ok    ($m) { Write-Host "    $m"   -ForegroundColor Green }
-function Write-Note  ($m) { Write-Host "    $m"   -ForegroundColor Yellow }
-function Write-Fail  ($m) { Write-Host "`nERROR: $m" -ForegroundColor Red; exit 1 }
-
-$InstallDir = $PSScriptRoot
-
-Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host " Practitioner Taxonomy Repair -- installer" -ForegroundColor Cyan
-Write-Host " Install dir: $InstallDir" -ForegroundColor Cyan
-Write-Host "============================================================" -ForegroundColor Cyan
-
-# ------------------------------------------------------------
-# 0. Validate this is a real extracted release dir
-# ------------------------------------------------------------
-Write-Step "Validating package layout"
-
-$propsFile = Join-Path $InstallDir 'PractitionerTaxonomyRepair.properties'
-$ddlFile   = Join-Path $InstallDir 'sql\create_cpe_repair_objects.sql'
-$callSrc   = Join-Path $InstallDir 'calls\practitioner_taxonomy_repair'
-$jarGlob   = Join-Path $InstallDir 'practitioner-taxonomy-repair-*-jar-with-dependencies.jar'
-
+# Validate required fields
+$required = @("DB_URL", "DB_USER", "DB_PASSWORD", "WS_BASE_URL", "CONNECTOR_ADMIN_PASSWORD",
+              "LOG_ONLY", "WS_RETRY_COUNT", "WS_RETRY_HTTP_CODES", "WS_RETRY_BACKOFF_MS",
+              "WS_RETRY_MAX_BACKOFF_MS", "SQLCMD_PATH")
 $missing = @()
-if (-not (Test-Path $propsFile))            { $missing += 'PractitionerTaxonomyRepair.properties' }
-if (-not (Test-Path $ddlFile))              { $missing += 'sql\create_cpe_repair_objects.sql' }
-if (-not (Test-Path $callSrc))              { $missing += 'calls\practitioner_taxonomy_repair\' }
-if (-not (Get-ChildItem $jarGlob -ErrorAction SilentlyContinue)) { $missing += 'practitioner-taxonomy-repair-*-jar-with-dependencies.jar' }
-
+foreach ($key in $required) {
+    if (-not $config[$key] -or $config[$key].Trim() -eq "") { $missing += $key }
+}
 if ($missing.Count -gt 0) {
-    Write-Fail ("This does not look like an extracted release directory. Missing:`n  - " +
-        ($missing -join "`n  - ") +
-        "`n  Run install.ps1 from the directory where you extracted the release zip.")
-}
-Write-Ok "Package layout OK."
-
-# ------------------------------------------------------------
-# 1. Resolve DB connection
-#    Source of truth = PractitionerTaxonomyRepair.properties.
-#    Any CLI param overrides the matching field from the file.
-# ------------------------------------------------------------
-Write-Step "Resolving DB connection"
-
-$lines  = Get-Content $propsFile
-$joined = ($lines -join "`n")
-
-function Get-PropValue ($key) {
-    $m = [regex]::Match($joined, "(?m)^\s*$([regex]::Escape($key))\s*=\s*(.+?)\s*$")
-    if ($m.Success) { return $m.Groups[1].Value } else { return $null }
+    Write-Error "Missing required values in install.config: $($missing -join ', ')"
+    exit 1
 }
 
-$fileUrl  = Get-PropValue 'db.url'
-$fileUser = Get-PropValue 'db.user'
-$filePass = Get-PropValue 'db.password'
+# LOG_ONLY must be true/false
+$logOnlyValue = $config["LOG_ONLY"].Trim().ToLower()
+if ($logOnlyValue -ne "true" -and $logOnlyValue -ne "false") {
+    Write-Error "LOG_ONLY in install.config must be 'true' or 'false', got: $($config['LOG_ONLY'])"
+    exit 1
+}
 
-# Parse jdbc:sqlserver://<host[\inst][:port|,port]>;databaseName=<db>;...
-$fileHost = $null; $filePort = $null; $fileDb = $null
-if ($fileUrl) {
-    $u = [regex]::Match($fileUrl, '^jdbc:sqlserver://([^;]+);')
-    if ($u.Success) {
-        $serverPart = $u.Groups[1].Value
-        $sp = [regex]::Match($serverPart, '^([^,:]+(?:\\[^,:]+)?)(?:[,:](\d+))?$')
-        if ($sp.Success) {
-            $fileHost = $sp.Groups[1].Value
-            if ($sp.Groups[2].Success) { $filePort = [int]$sp.Groups[2].Value }
+# Retry integers
+foreach ($k in @("WS_RETRY_COUNT", "WS_RETRY_BACKOFF_MS", "WS_RETRY_MAX_BACKOFF_MS")) {
+    $v = $config[$k].Trim()
+    $n = 0
+    if (-not [int]::TryParse($v, [ref]$n) -or $n -lt 0) {
+        Write-Error "$k must be a non-negative integer, got: $v"
+        exit 1
+    }
+}
+foreach ($tok in ($config["WS_RETRY_HTTP_CODES"] -split ",")) {
+    $t = $tok.Trim()
+    if ($t -eq "") { continue }
+    $n = 0
+    if (-not [int]::TryParse($t, [ref]$n)) {
+        Write-Error "WS_RETRY_HTTP_CODES contains non-integer token: '$t'"
+        exit 1
+    }
+}
+
+# Schema defaults
+$DB_MASTER_SCHEMA = if ($config["DB_MASTER_SCHEMA"] -and $config["DB_MASTER_SCHEMA"].Trim() -ne "") { $config["DB_MASTER_SCHEMA"].Trim() } else { "cpe_master" }
+$DB_REPAIR_SCHEMA = if ($config["DB_REPAIR_SCHEMA"] -and $config["DB_REPAIR_SCHEMA"].Trim() -ne "") { $config["DB_REPAIR_SCHEMA"].Trim() } else { "cpe_repair" }
+$DB_XREF_SCHEMA   = if ($config["DB_XREF_SCHEMA"]   -and $config["DB_XREF_SCHEMA"].Trim()   -ne "") { $config["DB_XREF_SCHEMA"].Trim()   } else { "cpe_xref"   }
+
+# ============================================================
+# Validate package layout (extracted release zip)
+# ============================================================
+$jarCandidates = @(Get-ChildItem -Path $INSTALL_DIR -Filter "practitioner-taxonomy-repair-*-jar-with-dependencies.jar" -ErrorAction SilentlyContinue)
+if ($jarCandidates.Count -ne 1) {
+    Write-Error "Expected exactly one practitioner-taxonomy-repair-*-jar-with-dependencies.jar in $INSTALL_DIR, found $($jarCandidates.Count). Did the release zip extract correctly?"
+    exit 1
+}
+$REPAIR_JAR_SRC  = $jarCandidates[0].FullName
+$REPAIR_JAR_NAME = $jarCandidates[0].Name
+
+$RUN_REPAIR_SRC  = Join-Path $INSTALL_DIR "run_repair.ps1"
+$DDL_SRC         = Join-Path $INSTALL_DIR "sql\create_cpe_repair_objects.sql"
+$CALL_SRC        = Join-Path $INSTALL_DIR "calls\practitioner_taxonomy_repair"
+
+$missingFiles = @()
+if (-not (Test-Path $RUN_REPAIR_SRC)) { $missingFiles += "run_repair.ps1" }
+if (-not (Test-Path $DDL_SRC))        { $missingFiles += "sql\create_cpe_repair_objects.sql" }
+if (-not (Test-Path $CALL_SRC))       { $missingFiles += "calls\practitioner_taxonomy_repair\" }
+if ($missingFiles.Count -gt 0) {
+    Write-Error "Missing files in install package: $($missingFiles -join ', ')"
+    exit 1
+}
+
+# ============================================================
+# Prompt for target directory + display banner
+# ============================================================
+Write-Host ""
+Write-Host "=== Practitioner Taxonomy Repair Installer ===" -ForegroundColor Cyan
+
+if (Test-Path "$INSTALL_DIR\version.txt") {
+    foreach ($line in Get-Content "$INSTALL_DIR\version.txt") {
+        if ($line -match '^VERSION=(.+)$')    { Write-Host ("Version: " + $Matches[1].Trim()) -ForegroundColor Cyan }
+        if ($line -match '^BUILD_DATE=(.+)$') { Write-Host ("Built:   " + $Matches[1].Trim()) -ForegroundColor Cyan }
+    }
+}
+Write-Host ""
+Write-Host "This is an add-on to your existing Claim Provider Data Pipeline install."
+Write-Host "Point this installer at the SAME base directory that already contains:"
+Write-Host "  <base>\Claim_Provider_Data_Extractor\"
+Write-Host "  <base>\Claim_Provider_Data_Loader\"
+Write-Host ""
+Write-Host "It will create a new sibling folder:"
+Write-Host "  <base>\Practitioner_Taxonomy_Repair\   (repair jar, env.properties, run_repair.ps1)"
+Write-Host "and drop the new call type into your loader:"
+Write-Host "  <base>\Claim_Provider_Data_Loader\practitioner_taxonomy_repair\"
+Write-Host ""
+
+$targetDir = Read-Host "Enter installation directory"
+$targetDir = $targetDir.Trim().TrimEnd('\')
+
+if (-not $targetDir) {
+    Write-Error "Installation directory is required."
+    exit 1
+}
+
+# ============================================================
+# Define paths + verify loader sibling exists
+# ============================================================
+$LOADER_DIR = "$targetDir\Claim_Provider_Data_Loader"
+$REPAIR_DIR = "$targetDir\Practitioner_Taxonomy_Repair"
+
+if (-not (Test-Path $LOADER_DIR)) {
+    Write-Error ("Loader install not found at: $LOADER_DIR`n" +
+                 "  This installer is an add-on; the Generic_HRP_WS_Call install must exist already.`n" +
+                 "  Install the daily pipeline first, or point -InstallDir at the correct base.")
+    exit 1
+}
+
+# Existing repair folder -- prompt overwrite y/N
+if (Test-Path $REPAIR_DIR) {
+    Write-Host ""
+    Write-Host "WARNING: A Practitioner_Taxonomy_Repair folder already exists at:" -ForegroundColor Yellow
+    Write-Host "  $REPAIR_DIR"
+    Write-Host "Re-installing will REPLACE the jar, run_repair.ps1, install.ps1, install.config,"
+    Write-Host "sql\, version.txt, and REGENERATE env.properties + PractitionerTaxonomyRepair.properties"
+    Write-Host "from install.config (any local edits to those two files will be lost)."
+    $confirm = Read-Host "Continue? (y/N)"
+    if ($confirm -ne "y") { Write-Host "Installation cancelled."; exit 0 }
+}
+
+Write-Host ""
+Write-Host "Installing to: $REPAIR_DIR" -ForegroundColor Green
+Write-Host "Call folder destination: $LOADER_DIR\practitioner_taxonomy_repair\" -ForegroundColor Green
+Write-Host ""
+
+# ============================================================
+# Create directory structure
+# ============================================================
+Write-Host "Creating directory structure..." -ForegroundColor Cyan
+New-Item -Path "$REPAIR_DIR\sql" -ItemType Directory -Force | Out-Null
+Write-Host "  $REPAIR_DIR\sql created"
+
+# ============================================================
+# Deploy jar + version + installer self + DDL
+# ============================================================
+Write-Host "Deploying components..." -ForegroundColor Cyan
+Copy-Item $REPAIR_JAR_SRC  "$REPAIR_DIR\$REPAIR_JAR_NAME"             -Force
+Copy-Item $DDL_SRC         "$REPAIR_DIR\sql\"                          -Force
+Copy-Item $configFile      "$REPAIR_DIR\install.config"                -Force
+Copy-Item "$INSTALL_DIR\install.ps1" "$REPAIR_DIR\install.ps1"         -Force
+if (Test-Path "$INSTALL_DIR\version.txt") {
+    Copy-Item "$INSTALL_DIR\version.txt" "$REPAIR_DIR\version.txt"     -Force
+}
+Write-Host "  Jar + DDL + installer + config deployed"
+
+# ============================================================
+# Deploy run_repair.ps1 with SQLCMD_PATH substituted
+# ============================================================
+$sqlcmdPath = $config["SQLCMD_PATH"]
+$runRepairContent = Get-Content $RUN_REPAIR_SRC -Raw
+$runRepairContent = $runRepairContent -replace '\$SQLCMD = ".*"', "`$SQLCMD = `"$sqlcmdPath`""
+Set-Content -Path "$REPAIR_DIR\run_repair.ps1" -Value $runRepairContent
+Write-Host "  run_repair.ps1 deployed (SQLCMD path substituted)"
+
+# ============================================================
+# Generate env.properties (consumed by the loader at run time via --env-file)
+# ============================================================
+$envContent = @(
+    "# env.properties for Practitioner_Taxonomy_Repair",
+    "# Generated by install.ps1 from install.config -- regenerate by re-running install.ps1.",
+    '# Referenced from the call folder properties via ${VARIABLE_NAME}',
+    "",
+    "# Database connection (loader uses these to query the cpe_repair TVF)",
+    "DB_URL=$($config['DB_URL'])",
+    "DB_USER=$($config['DB_USER'])",
+    "DB_PASSWORD=$($config['DB_PASSWORD'])",
+    "",
+    "# HRP web service base URL (no trailing slash)",
+    "WS_BASE_URL=$($config['WS_BASE_URL'])",
+    "",
+    "# WS credentials (password keyed by username; practitioner_taxonomy_repair uses connector_admin)",
+    "CONNECTOR_ADMIN_PASSWORD=$($config['CONNECTOR_ADMIN_PASSWORD'])",
+    "",
+    "# Log-only mode -- when true, loader logs SOAP envelopes instead of sending them to HRP.",
+    "LOG_ONLY=$logOnlyValue",
+    "",
+    "# WS call retry. count=0 disables retries (single attempt).",
+    "WS_RETRY_COUNT=$($config['WS_RETRY_COUNT'])",
+    "WS_RETRY_HTTP_CODES=$($config['WS_RETRY_HTTP_CODES'])",
+    "WS_RETRY_BACKOFF_MS=$($config['WS_RETRY_BACKOFF_MS'])",
+    "WS_RETRY_MAX_BACKOFF_MS=$($config['WS_RETRY_MAX_BACKOFF_MS'])"
+) -join "`r`n"
+Set-Content -Path "$REPAIR_DIR\env.properties" -Value $envContent
+Write-Host "  env.properties generated"
+
+# ============================================================
+# Generate PractitionerTaxonomyRepair.properties (consumed by the repair jar directly)
+# ============================================================
+$npiQuery = if ($config["NPI_QUERY"] -and $config["NPI_QUERY"].Trim() -ne "") { $config["NPI_QUERY"].Trim() } else { $null }
+$repairPropsLines = @(
+    "# PractitionerTaxonomyRepair.properties",
+    "# Generated by install.ps1 from install.config -- regenerate by re-running install.ps1.",
+    "",
+    "# --- Database connection ---",
+    "db.url=$($config['DB_URL'])",
+    "db.user=$($config['DB_USER'])",
+    "db.password=$($config['DB_PASSWORD'])",
+    "",
+    "# --- Schemas ---",
+    "db.master.schema=$DB_MASTER_SCHEMA",
+    "db.repair.schema=$DB_REPAIR_SCHEMA",
+    "db.xref.schema=$DB_XREF_SCHEMA"
+)
+if ($npiQuery) {
+    $repairPropsLines += @(
+        "",
+        "# --- Custom NPI auto-derive query (from install.config NPI_QUERY) ---",
+        "# Used by the jar when --npi-file is NOT passed. Verbatim; no schema substitution.",
+        "db.npi_query=$npiQuery"
+    )
+}
+Set-Content -Path "$REPAIR_DIR\PractitionerTaxonomyRepair.properties" -Value ($repairPropsLines -join "`r`n")
+Write-Host "  PractitionerTaxonomyRepair.properties generated"
+
+# ============================================================
+# Copy call folder into the loader install
+# ============================================================
+$CALL_DEST = "$LOADER_DIR\practitioner_taxonomy_repair"
+if (Test-Path $CALL_DEST) {
+    $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $backup = "$CALL_DEST.bak.$stamp"
+    Move-Item -Path $CALL_DEST -Destination $backup
+    Write-Host "  Existing call folder backed up to: $backup" -ForegroundColor Yellow
+}
+Copy-Item -Recurse $CALL_SRC $CALL_DEST
+Write-Host "  Call folder installed at: $CALL_DEST"
+
+# ============================================================
+# Optionally run DDL
+# ============================================================
+Write-Host ""
+$runDdl = Read-Host "Apply database DDL now (creates cpe_repair schema, tables, TVF, proc)? (y/N)"
+if ($runDdl -eq "y") {
+    Write-Host ""
+    Write-Host "Applying DDL..." -ForegroundColor Cyan
+
+    $sqlcmd = $config["SQLCMD_PATH"]
+    Write-Host "  Verifying sqlcmd (this may take a few seconds)..."
+    $sqlcmdOk = $false
+    try {
+        & $sqlcmd -? 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $sqlcmdOk = $true }
+    } catch {}
+    if (-not $sqlcmdOk) {
+        Write-Host "  WARNING: sqlcmd at '$sqlcmd' is not executable -- skipping DDL" -ForegroundColor Yellow
+    } else {
+        # Parse server + database from DB_URL
+        $dbUrl = $config["DB_URL"]
+        if ($dbUrl -match 'jdbc:sqlserver://([^;]+);databaseName=([^;]+)') {
+            $dbServer = $Matches[1] -replace ':', ','
+            $dbName   = $Matches[2]
+        } else {
+            Write-Host "  WARNING: Could not parse DB_URL -- skipping DDL" -ForegroundColor Yellow
+            $dbServer = $null
+        }
+
+        if ($dbServer) {
+            $dbUser = $config["DB_USER"]
+            $env:SQLCMDPASSWORD = $config["DB_PASSWORD"]
+            & $sqlcmd -b -S $dbServer -d $dbName -U $dbUser -i "$REPAIR_DIR\sql\create_cpe_repair_objects.sql"
+            $env:SQLCMDPASSWORD = $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  cpe_repair objects created" -ForegroundColor Green
+            } else {
+                Write-Host "  WARNING: DDL script returned errors -- check output above" -ForegroundColor Yellow
+            }
         }
     }
-    $d = [regex]::Match($fileUrl, 'databaseName=([^;]+)')
-    if ($d.Success) { $fileDb = $d.Groups[1].Value }
 }
 
-$gaveCliDb = $PSBoundParameters.ContainsKey('SqlServer') -or
-             $PSBoundParameters.ContainsKey('Database')  -or
-             $PSBoundParameters.ContainsKey('DbUser')     -or
-             $PSBoundParameters.ContainsKey('DbPassword')
-
-# Effective values: CLI wins, else properties file.
-$EffHost = if ($PSBoundParameters.ContainsKey('SqlServer'))  { $SqlServer }  else { $fileHost }
-$EffDb   = if ($PSBoundParameters.ContainsKey('Database'))   { $Database }   else { $fileDb }
-$EffUser = if ($PSBoundParameters.ContainsKey('DbUser'))     { $DbUser }     else { $fileUser }
-$EffPass = if ($PSBoundParameters.ContainsKey('DbPassword')) { $DbPassword } else { $filePass }
-$EffPort = if ($PSBoundParameters.ContainsKey('DbPort'))     { $DbPort }
-           elseif ($filePort)                                { $filePort }
-           else                                              { 1433 }
-
-# Validate -- reject empty or still-placeholder values.
-$bad = @()
-foreach ($p in @(
-        @{ n = 'server (db.url host / -SqlServer)';  v = $EffHost },
-        @{ n = 'database (db.url / -Database)';       v = $EffDb   },
-        @{ n = 'user (db.user / -DbUser)';            v = $EffUser },
-        @{ n = 'password (db.password / -DbPassword)'; v = $EffPass })) {
-    if ([string]::IsNullOrWhiteSpace($p.v) -or $p.v -match 'YOUR_DB_') { $bad += $p.n }
+# ============================================================
+# Summary
+# ============================================================
+Write-Host ""
+Write-Host "=== Installation Complete ===" -ForegroundColor Green
+Write-Host ""
+Write-Host "Installed to:"
+Write-Host "  Repair:       $REPAIR_DIR"
+Write-Host "  Call folder:  $CALL_DEST"
+Write-Host ""
+Write-Host "Next steps:"
+if ($runDdl -ne "y") {
+    Write-Host "  1. Apply the DDL:"
+    Write-Host "     sqlcmd -S <server> -d <database> -U <user> -P <password> -i `"$REPAIR_DIR\sql\create_cpe_repair_objects.sql`""
 }
-if ($bad.Count -gt 0) {
-    Write-Fail ("DB connection is not fully resolved. Unset/placeholder:`n  - " +
-        ($bad -join "`n  - ") +
-        "`n  Fix by EITHER editing the db.url / db.user / db.password lines in:`n    $propsFile`n" +
-        "  OR passing -SqlServer / -Database / -DbUser / -DbPassword on the command line.")
-}
-
-if ($gaveCliDb) { Write-Note "Using CLI-supplied DB value(s); rest from properties file." }
-else            { Write-Note "DB connection read from PractitionerTaxonomyRepair.properties." }
-Write-Ok "Target: server=$EffHost port=$EffPort db=$EffDb user=$EffUser"
-
-# sqlcmd -S form: host[\inst][,port]. Only append port if non-default.
-$serverArg = if ($EffPort -and $EffPort -ne 1433) { "$EffHost,$EffPort" } else { $EffHost }
-
-# ------------------------------------------------------------
-# 2. Apply DDL (idempotent)
-# ------------------------------------------------------------
-Write-Step "Applying database DDL (cpe_repair schema, tables, TVF, proc)"
-
-if ($SkipDdl) {
-    Write-Note "-SkipDdl set: skipping DDL. Ensure cpe_repair objects already exist."
-}
-else {
-    # Resolve sqlcmd: explicit param > PATH > common ODBC install location
-    $sqlcmd = $null
-    if ($SqlcmdPath) {
-        if (-not (Test-Path $SqlcmdPath)) { Write-Fail "-SqlcmdPath '$SqlcmdPath' not found." }
-        $sqlcmd = $SqlcmdPath
-    }
-    else {
-        $onPath = Get-Command sqlcmd -ErrorAction SilentlyContinue
-        if ($onPath) {
-            $sqlcmd = $onPath.Source
-        }
-        else {
-            $common = 'C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\170\Tools\Binn\SQLCMD.EXE'
-            if (Test-Path $common) { $sqlcmd = $common }
-        }
-    }
-    $target = "sqlcmd -S $serverArg -d $EffDb (user $EffUser) -i sql\create_cpe_repair_objects.sql"
-
-    if (-not $sqlcmd) {
-        $msg = ("sqlcmd not found on PATH or at the common ODBC location. " +
-            "Install the SQL Server command-line tools, or pass -SqlcmdPath, or run the DDL manually:`n" +
-            "  sqlcmd -S $serverArg -d $EffDb -U $EffUser -P <pwd> -b -i `"$ddlFile`"")
-        if ($WhatIfPreference) {
-            Write-Note "[WhatIf] $msg"
-            Write-Note "[WhatIf] Continuing -- would apply: $target"
-        }
-        else {
-            Write-Fail $msg
-        }
-    }
-    elseif ($PSCmdlet.ShouldProcess($target, "Apply DDL")) {
-        Write-Note "Using sqlcmd: $sqlcmd"
-        & $sqlcmd -S $serverArg -d $EffDb -U $EffUser -P $EffPass -b -i $ddlFile
-        if ($LASTEXITCODE -ne 0) {
-            Write-Fail "sqlcmd returned exit code $LASTEXITCODE. DDL was NOT applied cleanly. Aborting."
-        }
-        Write-Ok "DDL applied (idempotent -- safe to re-run)."
-    }
-}
-
-# ------------------------------------------------------------
-# 3. Configure PractitionerTaxonomyRepair.properties
-#    The file is the source of truth. Only write it when the operator
-#    explicitly passed DB params AND the file still has placeholders
-#    (or -Force). Targeted-preserve: only db.url/user/password lines.
-# ------------------------------------------------------------
-Write-Step "Configuring DB connection in PractitionerTaxonomyRepair.properties"
-
-$hasPlaceholders = ($joined -match 'YOUR_DB_HOST' -or $joined -match 'YOUR_DB_NAME' -or
-                    $joined -match 'YOUR_DB_USER' -or $joined -match 'YOUR_DB_PASSWORD')
-
-if (-not $gaveCliDb) {
-    Write-Note "No DB params on the command line -- properties file is the source of truth, leaving it untouched."
-}
-elseif (-not $hasPlaceholders -and -not $Force) {
-    Write-Note "CLI DB params given, but the properties file already has real values."
-    Write-Note "Preserving the file. Pass -Force to overwrite it with the CLI values."
-}
-else {
-    $newUrl = "jdbc:sqlserver://${EffHost}:${EffPort};databaseName=${EffDb};trustServerCertificate=true;"
-    $rewritten = $lines | ForEach-Object {
-        if    ($_ -match '^\s*db\.url\s*=')       { "db.url=$newUrl" }
-        elseif ($_ -match '^\s*db\.user\s*=')     { "db.user=$EffUser" }
-        elseif ($_ -match '^\s*db\.password\s*=') { "db.password=$EffPass" }
-        else { $_ }
-    }
-    if ($PSCmdlet.ShouldProcess($propsFile, "Write db.url / db.user / db.password")) {
-        # Preserve CRLF; do not append a trailing blank line.
-        [System.IO.File]::WriteAllText($propsFile, ($rewritten -join "`r`n") + "`r`n")
-        if ($hasPlaceholders) { Write-Ok "DB credentials written (placeholders replaced)." }
-        else                  { Write-Ok "DB credentials overwritten (-Force)." }
-        Write-Note "Schema lines (db.master.schema / db.repair.schema / db.xref.schema) left untouched."
-    }
-}
-
-# ------------------------------------------------------------
-# 4. Copy call folder into the loader install
-#    Mindful replacement: never silently destroy an operator-customized
-#    call folder (the <maintenanceReasonCode> TODO lives there). On a
-#    fresh target, copy. On an existing target, require -Force and back
-#    up the old folder to a timestamped sibling first.
-# ------------------------------------------------------------
-Write-Step "Installing call folder into the loader"
-
-if (-not (Test-Path $LoaderInstallPath)) {
-    Write-Fail "-LoaderInstallPath '$LoaderInstallPath' does not exist. Point this at your existing Claim_Provider_Data_Loader install directory."
-}
-
-$callDest = Join-Path $LoaderInstallPath 'practitioner_taxonomy_repair'
-
-if (Test-Path $callDest) {
-    if (-not $Force) {
-        Write-Note "A call folder already exists at:"
-        Write-Note "  $callDest"
-        Write-Note "It may contain operator edits (e.g. the <maintenanceReasonCode> values)."
-        Write-Note "Re-run with -Force to replace it. The existing folder will be backed up first."
-        Write-Note "Compare before overwriting, e.g.:"
-        Write-Note "  Compare-Object (Get-Content '$callSrc\practitioner_taxonomy_repair.properties') (Get-Content '$callDest\practitioner_taxonomy_repair.properties')"
-    }
-    else {
-        $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
-        $backup = "$callDest.bak.$stamp"
-        if ($PSCmdlet.ShouldProcess($callDest, "Back up to $backup then replace")) {
-            Move-Item -Path $callDest -Destination $backup
-            Write-Note "Existing call folder backed up to: $backup"
-            Copy-Item -Recurse -Path $callSrc -Destination $callDest
-            Write-Ok "Call folder replaced. Re-apply any operator edits from the backup if needed."
-        }
-    }
-}
-else {
-    if ($PSCmdlet.ShouldProcess($callDest, "Copy call folder")) {
-        Copy-Item -Recurse -Path $callSrc -Destination $callDest
-        Write-Ok "Call folder installed at: $callDest"
-    }
-}
-
-# ------------------------------------------------------------
-# Done
-# ------------------------------------------------------------
-Write-Host "`n============================================================" -ForegroundColor Green
-Write-Host " Install complete." -ForegroundColor Green
-Write-Host "============================================================" -ForegroundColor Green
-Write-Host @"
-
-Next steps (see INSTALL.txt for detail):
-
-  1. Dry run -- counts target practitioners, calls NPPES, no DB writes:
-       java -jar practitioner-taxonomy-repair-*-jar-with-dependencies.jar --dry-run
-
-  2. Stage a batch (prints BATCH_ID=<n>):
-       java -jar practitioner-taxonomy-repair-*-jar-with-dependencies.jar --description="Pilot"
-
-  3. Push amends in LOG_ONLY mode first, then for real, from your loader install:
-       java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<n> --LOG_ONLY=true --env-file=<env>
-
-"@ -ForegroundColor Gray
+Write-Host "  2. Run the repair orchestrator:"
+Write-Host "       cd `"$REPAIR_DIR`""
+Write-Host "       .\run_repair.ps1                                # auto-derive NPI list, real run"
+Write-Host "       .\run_repair.ps1 -NpiFile pilot.txt -DryRun     # dry-run a pilot list"
+Write-Host "       .\run_repair.ps1 -BatchId 7                     # resume the loader for batch 7"
+Write-Host ""
+Write-Host "  See INSTALL.txt and README.md for detail; CLAUDE_NOTES.md for design notes."
+Write-Host ""
