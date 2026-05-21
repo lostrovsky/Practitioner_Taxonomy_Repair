@@ -83,6 +83,10 @@ Practitioner_Taxonomy_Repair/
 │                                                mirrors pipeline's run_pipeline.ps1; ships in zip; install.ps1
 │                                                copies into the repair install dir with $SQLCMD substituted)
 ├── CLAUDE.md, CLAUDE_NOTES.md, TODO.md, README.md
+├── REGRESSION_TEST.md                          (manual smoke-test runbook --
+│                                                install, skip path, stage-amend
+│                                                via cpe_master inject + restore;
+│                                                always LOG_ONLY=true)
 ├── .claude/settings.local.json
 ├── .gitignore
 ├── deploy/
