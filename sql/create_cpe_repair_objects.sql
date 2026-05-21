@@ -38,7 +38,7 @@ BEGIN
         batch_id            BIGINT        NOT NULL,
         npi                 NVARCHAR(20)  NOT NULL,                 -- audit/lookup, NOT in SOAP payload
         practitioner_hcc_id NVARCHAR(50)  NOT NULL,                 -- the only field in the SOAP payload
-        status              NVARCHAR(20)  NOT NULL DEFAULT 'pending', -- pending | loaded | failed
+        status              NVARCHAR(20)  NOT NULL DEFAULT 'pending', -- pending | loaded | failed | skipped (no amend needed; master already matches NPPES)
         error_message       NVARCHAR(MAX) NULL,
         loaded_time         DATETIME2     NULL,
         created_time        DATETIME2     NOT NULL DEFAULT GETDATE(),
@@ -95,7 +95,7 @@ RETURN
         FROM cpe_repair.practitioner_repair pr
         JOIN cpe_repair.practitioner_taxonomy pt ON pt.entity_id = pr.entity_id
         WHERE pr.batch_id = @batch_id
-          AND pr.status <> 'loaded'
+          AND pr.status NOT IN ('loaded', 'skipped')
     )
     SELECT
         pr.entity_id,

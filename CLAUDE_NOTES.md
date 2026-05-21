@@ -28,9 +28,13 @@ Verified test case from v1.4.1: NPI 1003008574 -- post-fix, Hospitalist (208M000
                                                      │
                           ┌──────────────────────────▼───────────────────────┐
                           │ PractitionerTaxonomyRepair (this jar)            │
-                          │  - Read claims-source taxonomies from cpe_master │
                           │  - For each NPI: NPPESClient.lookupNpi(npi)      │
-                          │  - Combine + apply NPPES primary -> is_primary=1 │
+                          │  - Load ALL master taxonomies for NPI (any src)  │
+                          │  - DIFF: if master codes ⊇ NPPES codes AND       │
+                          │    master is_primary code == NPPES primary code  │
+                          │    -> record skip (status='skipped'), no amend   │
+                          │  - ELSE merge (dedup; NPPES primary wins;        │
+                          │    secondary = 2nd NPPES code if any)            │
                           │  - Look up taxonomy_name in cpe_xref.taxonomy    │
                           │  - INSERT into cpe_repair.* (own schema, own     │
                           │    batch_id sequence, never touches cpe_load)    │
@@ -60,9 +64,9 @@ Verified test case from v1.4.1: NPI 1003008574 -- post-fix, Hospitalist (208M000
 | Object | Purpose |
 |---|---|
 | `cpe_repair.batch` | One row per repair invocation. `batch_id` IDENTITY. |
-| `cpe_repair.practitioner_repair` | One row per (batch, practitioner). `entity_id` IDENTITY -- the post-call SQL target. Carries `practitioner_hcc_id` (used in SOAP) and `npi` (for ops audit). |
+| `cpe_repair.practitioner_repair` | One row per (batch, NPI considered). `entity_id` IDENTITY -- the post-call SQL target for `status='pending'` rows the loader sends. Carries `practitioner_hcc_id` (used in SOAP) and `npi` (for ops audit). `status` is one of `pending`/`loaded`/`failed`/`skipped`; `skipped` rows are recorded for the audit trail but the TVF filters them out so the loader never picks them up. For `skipped` rows, `error_message` holds the decision reason ("master already matches NPPES..."). |
 | `cpe_repair.practitioner_taxonomy` | One row per (entity, taxonomy). FK to `practitioner_repair`. Carries the NPPES-corrected `is_primary` flag. |
-| `cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id(@batch_id)` | TVF the loader queries. Returns one row per (practitioner, "other" taxonomy) plus scalar primary/secondary slots -- same row shape as `cpe_load.fn_get_practitioner_amends_for_run_id` so the loader's existing template engine handles it. |
+| `cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id(@batch_id)` | TVF the loader queries. Returns one row per (practitioner, "other" taxonomy) plus scalar primary/secondary slots -- same row shape as `cpe_load.fn_get_practitioner_amends_for_run_id` so the loader's existing template engine handles it. Filters `status NOT IN ('loaded','skipped')` so resume is free and `skipped` rows are never sent to HRP. |
 | `cpe_repair.sp_mark_practitioner_repair_loaded(@entity_id, @success, @error_message)` | Post-call SQL target. Mirrors `cpe_load.sp_mark_entity_loaded` shape. |
 
 DDL lives at `sql/create_cpe_repair_objects.sql`. Idempotent (`IF NOT EXISTS` on schema and tables; `CREATE OR ALTER` on TVF and proc).
@@ -95,7 +99,7 @@ Practitioner_Taxonomy_Repair/
 ## CLI
 
 ```bash
-java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar \
+java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar \
     [--log-output=both|file|console] \
     [--properties-file=<path>] \
     [--npi-file=<path>] \
@@ -115,7 +119,7 @@ java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar \
 
 ```bash
 # 1. Stage the corrections
-java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar
+java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar
    -> Repair batch 7 staged. Run the loader with --RUN_ID=7
    -> BATCH_ID=7
 
@@ -132,6 +136,26 @@ java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair \
 # 4. Verify in cpe_repair
 SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE batch_id = 7 GROUP BY status;
 ```
+
+## Decision policy (per NPI, since v1.3.0)
+
+Each NPI in the input list goes through this decision tree exactly once:
+
+1. **Not in `cpe_master.practitioner`** -> log warning, skip (no `cpe_repair` row written; `notInMaster` counter).
+2. **NPPES not found / no taxonomies / no primary marker** -> log warning, skip (no `cpe_repair` row written; `nppesNotFound` counter).
+3. **Match** (master codes ⊇ NPPES codes AND master's `is_primary=1` code == NPPES's primary code) -> record `status='skipped'` row in `practitioner_repair` with a reason in `error_message`. No taxonomy rows. The loader never picks it up (TVF filter).
+4. **Mismatch** -> stage an amend:
+   - **Primary** = NPPES primary code
+   - **Secondary** = the first non-primary code in NPPES's list (NPPES has no native secondary marker; this is our convention)
+   - **Others** = remaining NPPES codes + all master codes not already covered, deduped
+   - Status `pending`; the loader will send the SOAP amend.
+
+Match check rationale:
+- The whole set must be present in master (not just primary) so that if NPPES knows a code master doesn't have, we still push the new code to HRP.
+- Master's primary code must equal NPPES's primary code (this is the v1.4.0-bug case the tool exists to fix).
+- Master can have codes NPPES doesn't have. That's "same" for our purposes -- we have no signal NPPES wants those codes removed, and the daily pipeline will re-derive master from claims+NPPES anyway.
+
+End-of-run summary line: `N staged for amend; M skipped as already-matching; X NPPES-not-found; Y not-in-master (total N+M+X+Y considered)`.
 
 ## Constraints (load-bearing)
 

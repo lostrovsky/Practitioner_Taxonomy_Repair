@@ -4,7 +4,7 @@
 
 - [ ] **Get HRP-correct `<maintenanceReasonCode>` values** for a taxonomy-overlay amend. Currently the template mirrors `PractitionerCreateReason / 1` from the existing amend call type, which is wrong for a non-create operation. Update `<codeSetName>` and `<codeEntry>` in `calls/practitioner_taxonomy_repair/practitioner_taxonomy_repair.properties` once known.
 - [ ] **Verify `<updateMode>REPLACE</updateMode>` semantics in HRP.** Should replace the practitioner's full taxonomy list with what we send. If HRP actually treats it as `MERGE` (i.e., adds without removing), the overlay won't fix bugs where the wrong primary needs to be demoted. Test on a single practitioner in dev first.
-- [ ] **Decide affected-practitioner scope.** Default behavior (no `--npi-file` flag) processes every practitioner in cpe_master with at least one `NPPES`-source taxonomy. Confirm that's the right set, or scope it tighter. Two override mechanisms:
+- [ ] **Decide affected-practitioner scope** (de-risked since v1.3.0 — see note). Default behavior (no `--npi-file` flag) processes every practitioner in cpe_master with at least one `NPPES`-source taxonomy. As of v1.3.0, scope is **no longer correctness-critical** because the tool diffs master vs NPPES per NPI and only stages an amend when they actually disagree — an over-broad scope just makes more NPPES API calls and produces a longer `skipped`-row audit trail, not redundant amends. Scope still affects runtime (NPPES is sequential, ~500ms/NPI) and `cpe_repair` row volume. Two override mechanisms remain:
   - `--npi-file=<path>` — explicit list, one NPI per line (`#` for comments).
   - `db.npi_query` in `PractitionerTaxonomyRepair.properties` — custom SELECT returning one column of NPIs, applied verbatim. Useful for a load_run / bug-window filter without writing the list to a file first. `--npi-file` always wins over `db.npi_query`.
 
@@ -46,7 +46,7 @@
 - [ ] **Resume mode:** if a batch partially loaded, allow re-running the loader to pick up only `pending` / `failed` rows. The TVF already filters on `status <> 'loaded'`, so resume is essentially free — just verify behavior end-to-end.
 - [ ] **Concurrency for NPPES lookups.** Currently sequential. For a large batch (1000+ NPIs at ~500ms each = 8+ minutes), parallel HTTP calls would be a meaningful speedup. NPPES has rate limits — keep it modest (e.g., 5 concurrent).
 - [ ] **Local cache for `cpe_xref.taxonomy` lookups** if running multiple batches back-to-back. Currently fresh DB query per run.
-- [ ] **Diff/compare mode:** show what would change in HRP vs current `cpe_master` state without staging or pushing. Useful before committing a large batch.
+- [ ] **Standalone diff-report mode** (the in-line diff was built into the staging path in v1.3.0; this would be a separate read-only report). Show what would change in HRP vs current `cpe_master` state without writing anything to `cpe_repair`. `--dry-run` partially covers this today by logging the staged-vs-skipped sample without inserting; a richer human-readable diff per practitioner is the unmet part.
 
 ## Done
 

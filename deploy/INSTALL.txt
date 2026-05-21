@@ -85,7 +85,7 @@ Extract the release zip wherever you want this tool to live. e.g.:
 
 Resulting layout:
 
-    practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar
+    practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar
     PractitionerTaxonomyRepair.properties     (placeholder DB creds)
     install.ps1                               (automated installer)
     version.txt
@@ -142,11 +142,11 @@ STEP 5: STAGE A REPAIR BATCH
 "Dry run" first -- queries the DB to count target practitioners and
 calls NPPES, but does NOT insert anything:
 
-    java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar --dry-run
+    java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar --dry-run
 
 When you're ready to stage for real:
 
-    java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar ^
+    java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar ^
          --description="Pilot repair batch"
 
 The tool prints "BATCH_ID=<n>" at the end. Note that number for the

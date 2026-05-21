@@ -8,10 +8,16 @@ The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could 
 
 ## How it works
 
-1. Re-fetches NPPES live for each affected practitioner via the same `NPPESClient` the extractor uses (imported as a Maven dependency, never modified).
-2. Combines the live NPPES taxonomies with the practitioner's existing `claims`-source taxonomies from `cpe_master`.
-3. Stages a complete-overlay taxonomy list in a new isolated `cpe_repair` schema. NPPES's current primary marker becomes `is_primary=1`.
-4. The bundled call folder `practitioner_taxonomy_repair/` is run via the existing `Generic_HRP_WS_Call` loader to push taxonomy-only amends to HRP.
+For each NPI in the input list:
+
+1. **Re-fetch NPPES live** via the same `NPPESClient` the extractor uses (imported as a Maven dependency, never modified). Skip the NPI if NPPES doesn't know it or returns no taxonomies.
+2. **Diff against `cpe_master`** — load all of the practitioner's taxonomies (any source) and check whether master *already contains* NPPES's codes AND master's `is_primary=1` code matches NPPES's primary code.
+3. **If same**, record a `status='skipped'` row in `cpe_repair.practitioner_repair` (for audit) and move on. The loader will not pick it up — no SOAP amend is sent.
+4. **If different**, stage a merged taxonomy list in a new isolated `cpe_repair` schema:
+   - Primary = NPPES's primary code
+   - Secondary = the first non-primary code in NPPES's list (if any; NPPES itself has no secondary marker — this is the tool's convention)
+   - Others = remaining NPPES codes + master codes NPPES doesn't return, deduped
+5. The bundled call folder `practitioner_taxonomy_repair/` is run via the existing `Generic_HRP_WS_Call` loader to push the taxonomy-only amend to HRP — only for practitioners staged in step 4.
 
 ## Footprint
 
@@ -24,7 +30,7 @@ The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could 
 
 ### Install from the release zip (recommended)
 
-1. Download `practitioner_taxonomy_repair_v1.2.0.zip` from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it (e.g., into `C:\Tools\Practitioner_Taxonomy_Repair`).
+1. Download `practitioner_taxonomy_repair_v1.3.0.zip` from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it (e.g., into `C:\Tools\Practitioner_Taxonomy_Repair`).
 2. Edit the three `db.*` lines in `PractitionerTaxonomyRepair.properties` (placeholder `YOUR_*` tokens).
 3. Run the installer, supplying only your loader install path:
 
@@ -43,7 +49,7 @@ sqlcmd -S <server> -d <database> -U <user> -P <pwd> -i sql/create_cpe_repair_obj
 mvn clean package -DskipTests
 ```
 
-Maven produces `target/practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar` and copies the properties template next to it. Edit the properties file to fill in real `db.url` / `db.user` / `db.password`, then copy the call folder onto your loader install:
+Maven produces `target/practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar` and copies the properties template next to it. Edit the properties file to fill in real `db.url` / `db.user` / `db.password`, then copy the call folder onto your loader install:
 
 ```
 calls/practitioner_taxonomy_repair/  ->  <install>/Claim_Provider_Data_Loader/practitioner_taxonomy_repair/
@@ -55,7 +61,7 @@ Building requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn in
 
 ```bash
 # 1. Stage corrections (defaults: every practitioner with NPPES-source taxonomies)
-java -jar target/practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar
+java -jar target/practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar
    -> BATCH_ID=7
 
 # 2. Verify SOAP in LOG_ONLY mode
@@ -78,7 +84,7 @@ Two mechanisms, depending on whether your scope is a fixed list or a SQL filter:
 ```bash
 echo 1003008574 > npis.txt
 echo 1234567890 >> npis.txt
-java -jar practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar --npi-file=npis.txt --dry-run
+java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar --npi-file=npis.txt --dry-run
 ```
 
 **Custom SQL** — set `db.npi_query` in `PractitionerTaxonomyRepair.properties` to a `SELECT` that returns one column of NPIs. Used verbatim (no schema substitution), so qualify tables explicitly. Useful for a `cpe_load.load_run` bug-window filter without writing a file first:
