@@ -38,12 +38,17 @@ import java.util.logging.Logger;
  *   (deduped by code; one row per unique taxonomy code)
  *
  * Reads (no writes):
- *   cpe_master.practitioner             -- to get practitioner_hcc_id
- *   cpe_master.practitioner_taxonomy    -- ALL rows for each NPI, with is_primary
- *   cpe_xref.taxonomy                   -- to look up display_name from code
+ *   cpe_master.practitioner                       -- to get practitioner_hcc_id
+ *   cpe_master.practitioner_taxonomy              -- ALL rows for each NPI, with is_primary
+ *   [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY] -- to look up taxonomy name from code
+ *                                                   (same source the daily pipeline's
+ *                                                   sp_resolve_taxonomy_names uses;
+ *                                                   table + columns overridable via
+ *                                                   db.taxonomy.lookup.{table,code_column,name_column}
+ *                                                   properties)
  *
  * Writes (only):
- *   cpe_repair.batch                    -- one new row per invocation
+ *   cpe_repair.repair_run               -- one new row per invocation (run_id IDENTITY)
  *   cpe_repair.practitioner_repair      -- one row per NPI considered; status:
  *                                          'pending' (staged for amend) or
  *                                          'skipped' (already matched NPPES;
@@ -65,7 +70,7 @@ import java.util.logging.Logger;
  *                                                   set the db.npi_query property to a custom SELECT returning
  *                                                   one column of NPIs (e.g. scoped to a bug-window load_run).
  *                                                   --npi-file always wins over db.npi_query.)
- *   --description=<text>                (optional: stored on cpe_repair.batch.description for audit)
+ *   --description=<text>                (optional: stored on cpe_repair.repair_run.description for audit)
  *   --dry-run                           (optional: do everything except the final INSERTs; logs what would be staged)
  */
 public class PractitionerTaxonomyRepair {
@@ -77,8 +82,10 @@ public class PractitionerTaxonomyRepair {
     private static DBManager dbManager;
     private static String masterSchema;
     private static String repairSchema;
-    private static String xrefSchema;
-    private static String npiQueryOverride;   // optional db.npi_query; null/blank => use built-in default
+    private static String taxonomyLookupTable;   // default [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]
+    private static String taxonomyCodeColumn;    // default PROVIDER_TAXONOMY_CODE
+    private static String taxonomyNameColumn;    // default PROVIDER_TAXONOMY_NAME
+    private static String npiQueryOverride;      // optional db.npi_query; null/blank => use built-in default
 
     public static void main(String[] args) {
         int exitCode = 0;
@@ -228,7 +235,7 @@ public class PractitionerTaxonomyRepair {
             }
 
             if (staged.isEmpty() && skipped.isEmpty()) {
-                logger.info("Nothing to persist (no staged amends, no skipped rows). Exiting without creating a batch.");
+                logger.info("Nothing to persist (no staged amends, no skipped rows). Exiting without creating a run.");
                 return;
             }
 
@@ -239,13 +246,13 @@ public class PractitionerTaxonomyRepair {
             }
             Map<String, String> codeToName = lookupTaxonomyNames(allCodes);
 
-            // 5. Persist: one batch + N pending practitioner_repair (+ M practitioner_taxonomy)
+            // 5. Persist: one run + N pending practitioner_repair (+ M practitioner_taxonomy)
             //              + K skipped practitioner_repair (with status='skipped' and reason).
-            long batchId = persistBatch(description, staged, skipped, codeToName);
-            logger.info("Repair batch " + batchId + " staged successfully. " +
-                    "Run the loader with --RUN_ID=" + batchId + " against the practitioner_taxonomy_repair call folder.");
+            long runId = persistRun(description, staged, skipped, codeToName);
+            logger.info("Repair run " + runId + " staged successfully. " +
+                    "Run the loader with --RUN_ID=" + runId + " against the practitioner_taxonomy_repair call folder.");
             // Emit on stdout too so wrapper scripts can capture without parsing the log.
-            System.out.println("BATCH_ID=" + batchId);
+            System.out.println("RUN_ID=" + runId);
         } catch (Exception e) {
             if (logger != null) logger.log(Level.SEVERE, "Repair failed", e);
             else { System.err.println("Repair failed: " + e.getMessage()); e.printStackTrace(); }
@@ -272,10 +279,22 @@ public class PractitionerTaxonomyRepair {
         dbManager = new DBManager(config.getProperties(), logger);
         masterSchema = nonBlank(config.get("db.master.schema"), "cpe_master");
         repairSchema = nonBlank(config.get("db.repair.schema"), "cpe_repair");
-        xrefSchema   = nonBlank(config.get("db.xref.schema"),   "cpe_xref");
         validateSchemaName(masterSchema);
         validateSchemaName(repairSchema);
-        validateSchemaName(xrefSchema);
+        // Taxonomy code -> name lookup. Defaults match the daily pipeline's
+        // sp_resolve_taxonomy_names source (same DB user `cpp` already has access).
+        // Overridable for environments where the replica DB / schema / column names differ.
+        taxonomyLookupTable = nonBlank(config.get("db.taxonomy.lookup.table"),
+                "[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]");
+        taxonomyCodeColumn  = nonBlank(config.get("db.taxonomy.lookup.code_column"),
+                "PROVIDER_TAXONOMY_CODE");
+        taxonomyNameColumn  = nonBlank(config.get("db.taxonomy.lookup.name_column"),
+                "PROVIDER_TAXONOMY_NAME");
+        validateIdentifier(taxonomyCodeColumn);
+        validateIdentifier(taxonomyNameColumn);
+        // taxonomyLookupTable can be a 3-part name with brackets ([db].[schema].[table]) --
+        // validated by a looser regex.
+        validateQualifiedTableName(taxonomyLookupTable);
         // Optional verbatim SQL for the auto-derive path. Not validated -- operator-controlled
         // trust boundary, same as the loader's db.query in the call folder. Ignored when --npi-file is passed.
         String raw = config.get("db.npi_query");
@@ -294,8 +313,23 @@ public class PractitionerTaxonomyRepair {
             throw new IllegalArgumentException("Invalid schema name: " + s);
     }
 
+    /** Bare SQL identifier (column or unbracketed table name). */
+    private static void validateIdentifier(String s) {
+        if (s == null || !s.matches("^[a-zA-Z_][a-zA-Z0-9_]*$"))
+            throw new IllegalArgumentException("Invalid SQL identifier: " + s);
+    }
+
+    /** Up-to-3-part qualified table name; each part may be bare (a-z0-9_) or bracketed [...]. */
+    private static void validateQualifiedTableName(String s) {
+        if (s == null) throw new IllegalArgumentException("Invalid table name: null");
+        // Part = [bracketed-name] OR bare-identifier. Joined by dots, 1-3 parts.
+        String part = "(?:\\[[^\\[\\]]+\\]|[a-zA-Z_][a-zA-Z0-9_]*)";
+        if (!s.matches("^" + part + "(?:\\." + part + "){0,2}$"))
+            throw new IllegalArgumentException("Invalid qualified table name: " + s);
+    }
+
     // ============================================================
-    // Read paths -- all targeting cpe_master (read-only) and cpe_xref
+    // Read paths -- cpe_master.* (read-only) and the configured taxonomy lookup
     // ============================================================
     private static List<String> queryNpisWithNppesTaxonomies() throws SQLException {
         String sql;
@@ -384,8 +418,9 @@ public class PractitionerTaxonomyRepair {
         Map<String, String> map = new HashMap<>();
         if (codes.isEmpty()) return map;
         List<String> codeList = new ArrayList<>(codes);
-        String sql = "SELECT code, display_name FROM " + xrefSchema + ".taxonomy WHERE code IN ("
-                + commaPlaceholders(codeList.size()) + ")";
+        String sql = "SELECT " + taxonomyCodeColumn + ", " + taxonomyNameColumn +
+                     " FROM " + taxonomyLookupTable +
+                     " WHERE " + taxonomyCodeColumn + " IN (" + commaPlaceholders(codeList.size()) + ")";
         Connection conn = dbManager.getConnection();
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             for (int i = 0; i < codeList.size(); i++) ps.setString(i + 1, codeList.get(i));
@@ -395,39 +430,39 @@ public class PractitionerTaxonomyRepair {
         }
         // Anything not found → log; the SQL INSERT will use NULL for taxonomy_name.
         for (String c : codes) if (!map.containsKey(c))
-            logger.warning("No display_name in " + xrefSchema + ".taxonomy for code " + c + " (will insert NULL)");
+            logger.warning("No " + taxonomyNameColumn + " in " + taxonomyLookupTable + " for code " + c + " (will insert NULL)");
         return map;
     }
 
     // ============================================================
     // Write path -- INSERTs into cpe_repair only
     // ============================================================
-    private static long persistBatch(String description, List<RepairRow> rows, List<SkipRow> skipped,
-                                     Map<String, String> codeToName) throws SQLException {
+    private static long persistRun(String description, List<RepairRow> rows, List<SkipRow> skipped,
+                                   Map<String, String> codeToName) throws SQLException {
         Connection conn = dbManager.getConnection();
         boolean prevAutoCommit = conn.getAutoCommit();
         try {
             conn.setAutoCommit(false);
 
-            // 1. cpe_repair.batch
-            long batchId;
-            String batchSql = "INSERT INTO " + repairSchema + ".batch (description) OUTPUT INSERTED.batch_id VALUES (?)";
-            try (PreparedStatement ps = conn.prepareStatement(batchSql)) {
+            // 1. cpe_repair.repair_run
+            long runId;
+            String runSql = "INSERT INTO " + repairSchema + ".repair_run (description) OUTPUT INSERTED.run_id VALUES (?)";
+            try (PreparedStatement ps = conn.prepareStatement(runSql)) {
                 if (description == null) ps.setNull(1, Types.NVARCHAR); else ps.setString(1, description);
                 try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) throw new SQLException("INSERT into batch returned no row");
-                    batchId = rs.getLong(1);
+                    if (!rs.next()) throw new SQLException("INSERT into repair_run returned no row");
+                    runId = rs.getLong(1);
                 }
             }
-            logger.info("Created cpe_repair.batch row: batch_id=" + batchId);
+            logger.info("Created " + repairSchema + ".repair_run row: run_id=" + runId);
 
             // 2a. cpe_repair.practitioner_repair for staged rows (status defaults to 'pending');
             //     collect entity_ids back so the taxonomy rows can FK to them.
             String prPendingSql = "INSERT INTO " + repairSchema + ".practitioner_repair " +
-                    "(batch_id, npi, practitioner_hcc_id) OUTPUT INSERTED.entity_id VALUES (?, ?, ?)";
+                    "(run_id, npi, practitioner_hcc_id) OUTPUT INSERTED.entity_id VALUES (?, ?, ?)";
             try (PreparedStatement ps = conn.prepareStatement(prPendingSql)) {
                 for (RepairRow rr : rows) {
-                    ps.setLong(1, batchId);
+                    ps.setLong(1, runId);
                     ps.setString(2, rr.npi);
                     ps.setString(3, rr.hccId);
                     try (ResultSet rs = ps.executeQuery()) {
@@ -440,12 +475,12 @@ public class PractitionerTaxonomyRepair {
             // 2b. cpe_repair.practitioner_repair for skipped rows (status='skipped'; reason in error_message,
             //     which doubles as the decision-trail column for non-pending statuses). No taxonomy rows.
             String prSkippedSql = "INSERT INTO " + repairSchema + ".practitioner_repair " +
-                    "(batch_id, npi, practitioner_hcc_id, status, error_message) VALUES (?, ?, ?, 'skipped', ?)";
+                    "(run_id, npi, practitioner_hcc_id, status, error_message) VALUES (?, ?, ?, 'skipped', ?)";
             int skipInserts = 0;
             if (!skipped.isEmpty()) {
                 try (PreparedStatement ps = conn.prepareStatement(prSkippedSql)) {
                     for (SkipRow sr : skipped) {
-                        ps.setLong(1, batchId);
+                        ps.setLong(1, runId);
                         ps.setString(2, sr.npi);
                         ps.setString(3, sr.hccId);
                         ps.setString(4, sr.reason);
@@ -481,9 +516,9 @@ public class PractitionerTaxonomyRepair {
                     + taxRows + " practitioner_taxonomy rows");
 
             conn.commit();
-            return batchId;
+            return runId;
         } catch (SQLException e) {
-            try { conn.rollback(); logger.warning("persistBatch rolled back due to: " + e.getMessage()); } catch (SQLException ignored) {}
+            try { conn.rollback(); logger.warning("persistRun rolled back due to: " + e.getMessage()); } catch (SQLException ignored) {}
             throw e;
         } finally {
             try { conn.setAutoCommit(prevAutoCommit); } catch (SQLException ignored) {}

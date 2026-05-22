@@ -35,24 +35,26 @@ Verified test case from v1.4.1: NPI 1003008574 -- post-fix, Hospitalist (208M000
                           │    -> record skip (status='skipped'), no amend   │
                           │  - ELSE merge (dedup; NPPES primary wins;        │
                           │    secondary = 2nd NPPES code if any)            │
-                          │  - Look up taxonomy_name in cpe_xref.taxonomy    │
+                          │  - Look up taxonomy_name in                      │
+                          │    [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY] │
+                          │    (same source pipeline's sp_resolve uses)      │
                           │  - INSERT into cpe_repair.* (own schema, own     │
-                          │    batch_id sequence, never touches cpe_load)    │
+                          │    run_id IDENTITY, never touches cpe_load)      │
                           └──────────────────────────┬───────────────────────┘
-                                                     │ batch_id printed
+                                                     │ RUN_ID printed
                                                      ▼
                           ┌──────────────────────────────────────────────────┐
-                          │ Operator runs:                                   │
+                          │ Orchestrator (run_repair.ps1) runs:              │
                           │ java -jar generic-hrp-ws-call.jar               │
                           │      practitioner_taxonomy_repair                │
-                          │      --RUN_ID=<batch_id>                         │
+                          │      --RUN_ID=<run_id>                           │
                           │      --env-file=<env.properties>                 │
                           └──────────────────────────┬───────────────────────┘
                                                      │
                           ┌──────────────────────────▼───────────────────────┐
                           │ Loader queries TVF:                              │
                           │   cpe_repair.fn_get_practitioner_taxonomy_       │
-                          │   repair_for_batch_id(@batch_id)                 │
+                          │   repair_for_run_id(@run_id)                     │
                           │ Renders taxonomy-only amend SOAP, sends to HRP   │
                           │ Post-call SQL:                                   │
                           │   cpe_repair.sp_mark_practitioner_repair_loaded  │
@@ -63,13 +65,13 @@ Verified test case from v1.4.1: NPI 1003008574 -- post-fix, Hospitalist (208M000
 
 | Object | Purpose |
 |---|---|
-| `cpe_repair.batch` | One row per repair invocation. `batch_id` IDENTITY. |
-| `cpe_repair.practitioner_repair` | One row per (batch, NPI considered). `entity_id` IDENTITY -- the post-call SQL target for `status='pending'` rows the loader sends. Carries `practitioner_hcc_id` (used in SOAP) and `npi` (for ops audit). `status` is one of `pending`/`loaded`/`failed`/`skipped`; `skipped` rows are recorded for the audit trail but the TVF filters them out so the loader never picks them up. For `skipped` rows, `error_message` holds the decision reason ("master already matches NPPES..."). |
+| `cpe_repair.repair_run` | One row per repair invocation. `run_id` IDENTITY. Mirrors `cpe_load.load_run` shape and name; the column name matches across schemas (PK collision impossible because different schemas). |
+| `cpe_repair.practitioner_repair` | One row per (run, NPI considered). `entity_id` IDENTITY -- the post-call SQL target for `status='pending'` rows the loader sends. Carries `practitioner_hcc_id` (used in SOAP) and `npi` (for ops audit). `status` is one of `pending`/`loaded`/`failed`/`skipped`; `skipped` rows are recorded for the audit trail but the TVF filters them out so the loader never picks them up. For `skipped` rows, `error_message` holds the decision reason ("master already matches NPPES..."). |
 | `cpe_repair.practitioner_taxonomy` | One row per (entity, taxonomy). FK to `practitioner_repair`. Carries the NPPES-corrected `is_primary` flag. |
-| `cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id(@batch_id)` | TVF the loader queries. Returns one row per (practitioner, "other" taxonomy) plus scalar primary/secondary slots -- same row shape as `cpe_load.fn_get_practitioner_amends_for_run_id` so the loader's existing template engine handles it. Filters `status NOT IN ('loaded','skipped')` so resume is free and `skipped` rows are never sent to HRP. |
+| `cpe_repair.fn_get_practitioner_taxonomy_repair_for_run_id(@run_id)` | TVF the loader queries. Returns one row per (practitioner, "other" taxonomy) plus scalar primary/secondary slots -- same row shape as `cpe_load.fn_get_practitioner_amends_for_run_id` so the loader's existing template engine handles it. Filters `status NOT IN ('loaded','skipped')` so resume is free and `skipped` rows are never sent to HRP. |
 | `cpe_repair.sp_mark_practitioner_repair_loaded(@entity_id, @success, @error_message)` | Post-call SQL target. Mirrors `cpe_load.sp_mark_entity_loaded` shape. |
 
-DDL lives at `sql/create_cpe_repair_objects.sql`. Idempotent (`IF NOT EXISTS` on schema and tables; `CREATE OR ALTER` on TVF and proc).
+DDL lives at `sql/create_cpe_repair_objects.sql`. Idempotent (`IF NOT EXISTS` on schema and tables; `CREATE OR ALTER` on TVF and proc). Includes an embedded v1.x migration that drops the old `cpe_repair.batch` table and `fn_get_..._for_batch_id` TVF if present, so re-running the DDL on a pre-v1.5 install rebuilds under the new run_id naming.
 
 ## Layout
 
@@ -79,7 +81,7 @@ Practitioner_Taxonomy_Repair/
 ├── PractitionerTaxonomyRepair.properties      (DEV ONLY: local working tree skip-worktree'd with real creds;
 │                                                git HEAD has placeholders; NOT shipped in zip since v1.4.0
 │                                                -- install.ps1 generates it from install.config)
-├── run_repair.ps1                              (orchestrator: stages via jar, captures BATCH_ID, invokes loader;
+├── run_repair.ps1                              (orchestrator: stages via jar, captures RUN_ID, invokes loader;
 │                                                mirrors pipeline's run_pipeline.ps1; ships in zip; install.ps1
 │                                                copies into the repair install dir with $SQLCMD substituted)
 ├── CLAUDE.md, CLAUDE_NOTES.md, TODO.md, README.md
@@ -110,7 +112,7 @@ Practitioner_Taxonomy_Repair/
 ## CLI
 
 ```bash
-java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar \
+java -jar practitioner-taxonomy-repair-1.5.0-jar-with-dependencies.jar \
     [--log-output=both|file|console] \
     [--properties-file=<path>] \
     [--npi-file=<path>] \
@@ -123,29 +125,23 @@ java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar \
   - Default: `SELECT DISTINCT npi FROM <db.master.schema>.practitioner_taxonomy WHERE taxonomy_source = 'NPPES'`.
   - Override: set `db.npi_query` in `PractitionerTaxonomyRepair.properties` to a `SELECT` returning one column of NPIs. Used verbatim (no schema substitution). Intended for a `cpe_load.load_run` bug-window filter so the operator doesn't have to materialize the list to a file first. `--npi-file` always wins over `db.npi_query`.
   - Whichever query is used is logged on every run (first 500 chars; truncated if longer).
-- `--dry-run`: do everything except the final INSERTs. Logs what would be staged. Useful before committing a large batch.
-- `--description`: stored on `cpe_repair.batch.description` for audit.
+- `--dry-run`: do everything except the final INSERTs. Logs what would be staged. Useful before committing a large run.
+- `--description`: stored on `cpe_repair.repair_run.description` for audit.
 
 ## Operator flow
 
 ```bash
-# 1. Stage the corrections
-java -jar practitioner-taxonomy-repair-1.3.0-jar-with-dependencies.jar
-   -> Repair batch 7 staged. Run the loader with --RUN_ID=7
-   -> BATCH_ID=7
+# 1. Stage the corrections (one shot via run_repair.ps1)
+.\run_repair.ps1 -NpiFile pilot.txt
+   -> Repair run 7 staged. Loader invoked with --RUN_ID=7.
 
-# 2. Push amends (LOG_ONLY=true to verify SOAP first)
-java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair \
-     --RUN_ID=7 --LOG_ONLY=true \
-     --env-file=<install>/Claim_Provider_Data_Pipeline/env.properties
+# Or run jar + loader directly (the orchestrator does this for you):
+java -jar practitioner-taxonomy-repair-*-jar-with-dependencies.jar
+   -> RUN_ID=7
+java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=7 --env-file=<dir>/env.properties
 
-# 3. Once verified, push for real
-java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair \
-     --RUN_ID=7 \
-     --env-file=<install>/Claim_Provider_Data_Pipeline/env.properties
-
-# 4. Verify in cpe_repair
-SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE batch_id = 7 GROUP BY status;
+# Verify in cpe_repair
+SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE run_id = 7 GROUP BY status;
 ```
 
 ## Decision policy (per NPI, since v1.3.0)
@@ -173,7 +169,7 @@ End-of-run summary line: `N staged for amend; M skipped as already-matching; X N
 - **No code modifications** to any other project. `Claim_Provider_Data_Extractor` is imported via Maven; `Generic_HRP_WS_Call` is invoked unchanged; `Claim_Provider_Data_Pipeline` is not touched at all.
 - **Read-only on `cpe_master.*`** — for `practitioner_hcc_id` lookup and `claims`-source taxonomy preservation.
 - **No writes to `cpe.*` or `cpe_load.*`.**
-- **Own batch_id sequence** in `cpe_repair.batch`. Does not consume `cpe_load.load_run.run_id`.
+- **Own `run_id` IDENTITY sequence** in `cpe_repair.repair_run`. Does not consume `cpe_load.load_run.run_id` -- different schema, so PK collision is impossible even though the column name matches.
 - **NPPES live re-fetch** is the source of truth for "what's primary." We do not preserve any historical NPPES marker in `cpe_master`.
 
 ## Verified end-to-end (2026-04-30)
@@ -244,22 +240,22 @@ remediation tool); no `INTEGRATION_PASSWORD` (this call type uses
    archive-to-`logs/`.
 2. Validate prerequisites (jar via glob in script dir; loader jar at
    `..\Claim_Provider_Data_Loader\generic-hrp-ws-call.jar`; env.properties;
-   call folder; sqlcmd; -NpiFile path; -BatchId numeric).
+   call folder; sqlcmd; -NpiFile path; -RunId numeric).
 3. Parse env.properties for DB_URL/USER/PASSWORD + LOG_ONLY; live DB
    connectivity check with hint-tagged failure messages (expired, login
    failed, server unreachable, db not found).
 4. **STEP 2: stage** -- `java -jar <repair jar> [--npi-file=...] [--description=...] [--dry-run]`.
-   Captures `BATCH_ID=<n>` from stdout. Handles `--dry-run` (exits with summary,
+   Captures `RUN_ID=<n>` from stdout. Handles `--dry-run` (exits with summary,
    no loader call) and the "nothing to amend" success-no-op case (jar exits 0
-   without emitting BATCH_ID).
+   without emitting RUN_ID).
 5. **STEP 3: load** -- `java -jar generic-hrp-ws-call.jar practitioner_taxonomy_repair
-   --RUN_ID=<batch> --env-file=...\env.properties`. Honors LOG_ONLY from
+   --RUN_ID=<n> --env-file=...\env.properties`. Honors LOG_ONLY from
    env.properties; `-LogOnlyOverride` switch passes `--LOG_ONLY=true` for one run.
-   Loader failure prints a `.\run_repair.ps1 -BatchId <n>` resume hint.
-6. Resume mode (`-BatchId <n>`) skips Step 2 and re-invokes the loader against
-   an existing batch. TVF filter (`status NOT IN ('loaded','skipped')`) means
+   Loader failure prints a `.\run_repair.ps1 -RunId <n>` resume hint.
+6. Resume mode (`-RunId <n>`) skips Step 2 and re-invokes the loader against
+   an existing run. TVF filter (`status NOT IN ('loaded','skipped')`) means
    already-completed rows complete instantly.
-7. End-of-run summary lines (batch_id, elapsed, log file path, per-status
+7. End-of-run summary lines (run_id, elapsed, log file path, per-status
    counts queried from `cpe_repair.practitioner_repair`).
 
 **Rationale for the rewrite (v1.4.0):** the v1.1.0-v1.3.0 installer was
@@ -295,7 +291,8 @@ GitHub: https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases
 | `v1.1.0` | 2026-05-19 | `72a94c6` | `practitioner_taxonomy_repair_v1.1.0.zip` (~1.5 MB, 9 entries) | Adds `install.ps1` (properties-as-source, idempotent, upgrade-safe). Hardens `build_package.ps1` packaging (see below). Java code unchanged; jar inside the zip is still `practitioner-taxonomy-repair-1.0.0-jar-with-dependencies.jar` (pom version unchanged). |
 | `v1.2.0` | 2026-05-20 | `242dec0` | `practitioner_taxonomy_repair_v1.2.0.zip` (~1.5 MB, 9 entries) | Adds **`db.npi_query`** — operator-configurable verbatim SELECT for the auto-derive path (intended for `cpe_load.load_run` bug-window scoping; `--npi-file` still wins). Bumps pom to **1.2.0** (jar inside zip is now `practitioner-taxonomy-repair-1.2.0-jar-with-dependencies.jar` — first honest artifact version). `build_package.ps1` jar path made version-agnostic (glob), so future pom bumps don't require touching the packaging script. |
 | `v1.3.0` | 2026-05-21 | `8875334` | `practitioner_taxonomy_repair_v1.3.0.zip` (~1.5 MB, 9 entries, jar `1.3.0`) | **Behavior change: diff-and-skip per NPI.** Tool no longer unconditionally stages amends. Compares NPPES vs master per NPI; if `master.codes ⊇ NPPES.codes` AND `master.is_primary=1 code == NPPES.primary code`, records `status='skipped'` (with reason in `error_message`) instead of staging. Mismatch path builds merge: primary=NPPES primary; secondary = first non-primary NPPES code (tool's convention — NPPES has no native secondary); others = remaining NPPES + master-only, deduped. TVF filter widened to `status NOT IN ('loaded','skipped')`. Pom bumped to 1.3.0. The v1.4.1 verification case (NPI 1003008574) now produces a `skipped` row instead of an amend (correct under new policy). |
-| `v1.4.0` (Latest) | 2026-05-21 | `1cde3aa` | `practitioner_taxonomy_repair_v1.4.0.zip` (jar still `1.3.0` — Java unchanged) | **Install + orchestration redesigned to mirror the daily pipeline.** New `run_repair.ps1` orchestrator (concurrency lock, transcript log, env.properties parse, DB check, stage → capture BATCH_ID → loader; `-BatchId` resume mode). New `install.config` single-source-of-truth template; `install.ps1` rewritten pipeline-style (prompts for installation directory, creates `<base>\Practitioner_Taxonomy_Repair\` sibling, generates `env.properties` + `PractitionerTaxonomyRepair.properties` from install.config, copies call folder to loader, optional DDL apply). The v1.1.0-v1.3.0 `-LoaderInstallPath` CLI flow is gone; `PractitionerTaxonomyRepair.properties` no longer shipped (generated by installer). Pom stays 1.3.0 (no Java change). |
+| `v1.4.0` | 2026-05-21 | `1cde3aa` | `practitioner_taxonomy_repair_v1.4.0.zip` (jar still `1.3.0` — Java unchanged) | **Install + orchestration redesigned to mirror the daily pipeline.** New `run_repair.ps1` orchestrator (concurrency lock, transcript log, env.properties parse, DB check, stage → capture BATCH_ID → loader; `-BatchId` resume mode). New `install.config` single-source-of-truth template; `install.ps1` rewritten pipeline-style (prompts for installation directory, creates `<base>\Practitioner_Taxonomy_Repair\` sibling, generates `env.properties` + `PractitionerTaxonomyRepair.properties` from install.config, copies call folder to loader, optional DDL apply). The v1.1.0-v1.3.0 `-LoaderInstallPath` CLI flow is gone; `PractitionerTaxonomyRepair.properties` no longer shipped (generated by installer). Pom stays 1.3.0 (no Java change). |
+| `v1.5.0` (Latest) | 2026-05-22 | TBD | `practitioner_taxonomy_repair_v1.5.0.zip` (jar `1.5.0`) | **Two corrective changes after operator feedback.** (1) **Taxonomy lookup fixed**: previously queried a fabricated `cpe_xref.taxonomy` table that doesn't exist in the daily-pipeline ecosystem; now queries `[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]` (`PROVIDER_TAXONOMY_CODE` / `PROVIDER_TAXONOMY_NAME`) -- the same source the pipeline's `sp_resolve_taxonomy_names` uses. Overridable via `db.taxonomy.lookup.{table,code_column,name_column}`. `DB_XREF_SCHEMA` dropped from install.config. (2) **Vocab unified with pipeline**: `cpe_repair.batch` -> `cpe_repair.repair_run`; `batch_id` column -> `run_id` everywhere; TVF renamed to `fn_get_practitioner_taxonomy_repair_for_run_id`; Java jar stdout `BATCH_ID=<n>` -> `RUN_ID=<n>`; `run_repair.ps1 -BatchId` -> `-RunId`. DDL ships with embedded v1.x->v1.5 migration that drops the old batch table and TVF on re-apply. Pom bumped to 1.5.0. |
 
 ### Packaging gotcha (caught during v1.1.0 build — do not regress)
 
@@ -321,4 +318,6 @@ just defense-in-depth against the AV race.
 
 ## State at Time of Notes
 
-Release `v1.4.0` shipped 2026-05-21 (marked Latest) -- install + orchestration redesigned to mirror the daily pipeline pattern. Pipeline-style `install.config` + interactive `install.ps1` create a `Practitioner_Taxonomy_Repair\` sibling folder next to the existing extractor/loader, with its own `env.properties` and a `run_repair.ps1` orchestrator (same shape as `run_pipeline.ps1`) that handles both the stage step and the loader call. Pom stays 1.3.0 -- no Java change; the diff-and-skip behavior shipped in v1.3.0 is unchanged. v1.0.0-v1.3.0 remain published and unchanged. DDL applied to dev DB only. **Not yet smoke-tested with a real install.** Next step is to install into a dev environment and exercise `run_repair.ps1` end-to-end against a deliberately-mismatched NPI (still need one where master shows a v1.4.0-buggy primary to exercise the stage-an-amend branch). The three blockers in TODO.md remain: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and affected-practitioner scope (de-risked since v1.3.0).
+Release `v1.5.0` shipped 2026-05-22 (marked Latest) -- corrective release after operator feedback on v1.4.0. Two changes: (1) the fabricated `cpe_xref.taxonomy` lookup is replaced with the canonical `[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]` source the daily pipeline already uses (overridable via `db.taxonomy.lookup.*` properties); (2) the entire `batch_id` vocab (`cpe_repair.batch`, TVF `..._for_batch_id`, jar stdout `BATCH_ID=`, `run_repair.ps1 -BatchId`) is renamed to `run_id` to match the pipeline's `cpe_load.load_run.run_id` convention. DDL includes an embedded migration so re-applying it on a pre-v1.5 install drops the old batch table and TVF cleanly. Pom bumped to 1.5.0 since Java code changed. v1.0.0-v1.4.0 remain published and unchanged. The three blockers in TODO.md remain: HRP-correct `<maintenanceReasonCode>`, verifying `<updateMode>REPLACE</updateMode>` semantics, and affected-practitioner scope (de-risked since v1.3.0).
+
+Smoke tested end-to-end against the local INTEGRATION_PLUS_DB on 2026-05-22 (re-using the [REGRESSION_TEST.md](REGRESSION_TEST.md) procedure). Tear-down → fresh install → DDL embedded migration ran cleanly ("Migrating v1.x: dropping old cpe_repair.batch / practitioner_repair / practitioner_taxonomy"; new objects created with `repair_run` / `fn_get_..._for_run_id` names). Skip-path pilot (5 NPIs, all matching): 5 skipped, RUN_ID=1 captured, loader saw `Total groups: 0`. Inject-and-restore on NPI 1003008574: primary mismatch detected (`master=207Q00000X, NPPES=208M00000X`), 1 staged, RUN_ID=2 captured, SOAP envelope rendered with `<primarySpecialty><codeName>Hospitalist</codeName></primarySpecialty>` + `<secondarySpecialty><codeName>Family Medicine</codeName></secondarySpecialty>` (note: PROVIDER_TAXONOMY uses shorter names than the cpe_xref had -- `Hospitalist` not `Hospitalist Physician` -- because that's what the daily pipeline already uses and what HRP expects). cpe_master row restored byte-identical (208M primary=1, 207Q is_secondary=1 unchanged).

@@ -12,13 +12,13 @@ param(
     [string]$NpiFile = "",
     [string]$Description = "",
     [switch]$DryRun,
-    [string]$BatchId = "",       # Resume mode: skip the stage phase, re-invoke the loader against an existing batch.
+    [string]$RunId = "",         # Resume mode: skip the stage phase, re-invoke the loader against an existing run.
                                   # TVF filters status NOT IN ('loaded','skipped') so previously-loaded rows complete instantly.
     [switch]$LogOnlyOverride     # Override env.properties LOG_ONLY=false for one run. The loader's --LOG_ONLY=true wins regardless.
 )
 
 # Resume mode short-circuits the stage phase.
-$RESUME_MODE = ($BatchId -ne "")
+$RESUME_MODE = ($RunId -ne "")
 
 # ============================================================
 # Directory configuration (all paths relative to script location)
@@ -67,7 +67,7 @@ function Get-RunSummaryLines {
     $elapsed = if ($REPAIR_START) { [int]((Get-Date) - $REPAIR_START).TotalSeconds } else { 0 }
     $lines = @(
         "Status:       $Status",
-        "Batch ID:     $(if ($BATCH_ID) { $BATCH_ID } else { '(not assigned)' })"
+        "Run ID:       $(if ($RUN_ID) { $RUN_ID } else { '(not assigned)' })"
     )
     if ($RESUME_MODE) {
         $lines += "Mode:         resume (stage skipped, loader-only retry)"
@@ -83,14 +83,14 @@ function Get-RunSummaryLines {
     )
     if ($ErrorMessage) { $lines += @("Error:", "  $ErrorMessage", "") }
 
-    # Per-batch counts from cpe_repair.practitioner_repair.
-    if ($BATCH_ID -and $DB_SERVER -and -not $DryRun) {
+    # Per-run counts from cpe_repair.practitioner_repair.
+    if ($RUN_ID -and $DB_SERVER -and -not $DryRun) {
         try {
             $env:SQLCMDPASSWORD = $DB_PASSWORD
-            $countsRaw = & $SQLCMD -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -W -s "|" -Q "SET NOCOUNT ON; SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE batch_id = $BATCH_ID GROUP BY status ORDER BY status" 2>$null
+            $countsRaw = & $SQLCMD -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -W -s "|" -Q "SET NOCOUNT ON; SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE run_id = $RUN_ID GROUP BY status ORDER BY status" 2>$null
             $env:SQLCMDPASSWORD = $null
             if ($countsRaw) {
-                $lines += "Batch $BATCH_ID row counts by status:"
+                $lines += "Run $RUN_ID row counts by status:"
                 foreach ($line in $countsRaw) {
                     $p = $line.Trim() -split '\|'
                     if ($p.Count -eq 2 -and $p[0].Trim() -ne '') {
@@ -191,8 +191,8 @@ if (-not (Test-Path $CALL_DIR)) {
 if ($NpiFile -and -not (Test-Path $NpiFile)) {
     $errors += "-NpiFile '$NpiFile' does not exist"
 }
-if ($BatchId -and $BatchId -notmatch '^\d+$') {
-    $errors += "-BatchId '$BatchId' must be a positive integer"
+if ($RunId -and $RunId -notmatch '^\d+$') {
+    $errors += "-RunId '$RunId' must be a positive integer"
 }
 
 # Functional sqlcmd check
@@ -265,7 +265,7 @@ try {
 }
 
 $REPAIR_START = Get-Date
-$BATCH_ID = $null
+$RUN_ID = $null
 
 if ($LOG_ONLY) {
     Write-Host ""
@@ -290,7 +290,7 @@ if (-not $RESUME_MODE) {
     if ($Description) { $jarArgs += "--description=$Description" }
     if ($DryRun)      { $jarArgs += "--dry-run" }
 
-    # Run jar; capture stdout so we can parse BATCH_ID, while also tee'ing it
+    # Run jar; capture stdout so we can parse RUN_ID, while also tee'ing it
     # to the host so the operator sees progress + the transcript captures it.
     $jarOutput = & java @jarArgs 2>&1
     $jarExit = $LASTEXITCODE
@@ -301,61 +301,61 @@ if (-not $RESUME_MODE) {
     }
 
     if ($DryRun) {
-        Write-Step "DRY-RUN COMPLETE (no batch created; no loader call)"
+        Write-Step "DRY-RUN COMPLETE (no run created; no loader call)"
         Write-RunSummary -Status "DRY-RUN"
         Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
         try { Stop-Transcript | Out-Null } catch {}
         exit 0
     }
 
-    # Parse BATCH_ID=<n> line from jar stdout
-    $batchLine = $jarOutput | Where-Object { $_ -match '^BATCH_ID=\d+$' } | Select-Object -First 1
-    if (-not $batchLine) {
-        # Could be the "nothing to persist" case (everything would-be-skipped already match).
-        # Jar exits 0 in that case without printing BATCH_ID. Treat as success-no-op.
-        Write-Step "STAGING COMPLETE (no batch created -- nothing to amend)"
+    # Parse RUN_ID=<n> line from jar stdout
+    $runLine = $jarOutput | Where-Object { $_ -match '^RUN_ID=\d+$' } | Select-Object -First 1
+    if (-not $runLine) {
+        # Could be the "nothing to persist" case (every NPI already matches NPPES).
+        # Jar exits 0 in that case without printing RUN_ID. Treat as success-no-op.
+        Write-Step "STAGING COMPLETE (no run created -- nothing to amend)"
         Write-Host "  Repair jar found no work to stage. See log for the decision summary line." -ForegroundColor Yellow
         Write-RunSummary -Status "NO-OP"
         Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
         try { Stop-Transcript | Out-Null } catch {}
         exit 0
     }
-    $BATCH_ID = ($batchLine -replace '^BATCH_ID=', '').Trim()
+    $RUN_ID = ($runLine -replace '^RUN_ID=', '').Trim()
     Write-Host ""
-    Write-Host "Captured BATCH_ID: $BATCH_ID" -ForegroundColor Green
+    Write-Host "Captured RUN_ID: $RUN_ID" -ForegroundColor Green
 
 } else {
-    # Resume: use the provided batch_id, skip the stage phase
-    $BATCH_ID = $BatchId
+    # Resume: use the provided run_id, skip the stage phase
+    $RUN_ID = $RunId
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "  RESUME MODE: Re-invoking loader for batch_id=$BATCH_ID" -ForegroundColor Cyan
+    Write-Host "  RESUME MODE: Re-invoking loader for run_id=$RUN_ID" -ForegroundColor Cyan
     Write-Host "  Skipping STEP 2 (stage phase)" -ForegroundColor Cyan
     Write-Host "  TVF filter (status NOT IN 'loaded','skipped') means already-loaded" -ForegroundColor Cyan
     Write-Host "  and already-skipped rows are picked up only if pending/failed." -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
 
-    # Sanity-check the batch exists.
+    # Sanity-check the run exists.
     try {
         $env:SQLCMDPASSWORD = $DB_PASSWORD
-        $batchCheck = & $SQLCMD -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM cpe_repair.batch WHERE batch_id = $BATCH_ID" 2>$null
+        $runCheck = & $SQLCMD -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM cpe_repair.repair_run WHERE run_id = $RUN_ID" 2>$null
         $env:SQLCMDPASSWORD = $null
-        if (-not $batchCheck -or ([int](($batchCheck | Select-Object -First 1).Trim()) -eq 0)) {
-            Remove-LockAndExit "Batch $BATCH_ID not found in cpe_repair.batch. Cannot resume."
+        if (-not $runCheck -or ([int](($runCheck | Select-Object -First 1).Trim()) -eq 0)) {
+            Remove-LockAndExit "Run $RUN_ID not found in cpe_repair.repair_run. Cannot resume."
         }
     } catch {
         $env:SQLCMDPASSWORD = $null
-        Remove-LockAndExit "Could not verify batch $BATCH_ID exists: $_"
+        Remove-LockAndExit "Could not verify run $RUN_ID exists: $_"
     }
 }
 
 # ============================================================
 # STEP 3: Invoke loader (Generic_HRP_WS_Call) against the new call type
 # ============================================================
-Write-Step "STEP 3: Loading practitioner_taxonomy_repair (batch_id=$BATCH_ID)"
+Write-Step "STEP 3: Loading practitioner_taxonomy_repair (run_id=$RUN_ID)"
 
 # Build loader args. --LOG_ONLY=true is honored when env says LOG_ONLY=true OR -LogOnlyOverride passed.
-$loaderArgs = @("-jar", $WS_JAR, $CALL_DIR, "--RUN_ID=$BATCH_ID", "--log-output=$LogOutput", "--env-file=$ENV_FILE")
+$loaderArgs = @("-jar", $WS_JAR, $CALL_DIR, "--RUN_ID=$RUN_ID", "--log-output=$LogOutput", "--env-file=$ENV_FILE")
 if ($LogOnlyOverride) { $loaderArgs += "--LOG_ONLY=true" }
 
 & java @loaderArgs 2>&1 | Out-Host
@@ -368,20 +368,20 @@ if ($loaderExit -ne 0) {
     Write-Host "============================================================" -ForegroundColor Red
     Write-Host ""
     Write-Host "  To resume after fixing the issue:" -ForegroundColor Yellow
-    Write-Host "    .\run_repair.ps1 -BatchId $BATCH_ID" -ForegroundColor Yellow
+    Write-Host "    .\run_repair.ps1 -RunId $RUN_ID" -ForegroundColor Yellow
     Write-Host "  TVF filter skips already-loaded rows; only pending/failed retry." -ForegroundColor Yellow
-    Remove-LockAndExit "Loader failed for batch_id=$BATCH_ID (exit $loaderExit)"
+    Remove-LockAndExit "Loader failed for run_id=$RUN_ID (exit $loaderExit)"
 }
 
-Write-Step "REPAIR COMPLETE (batch_id=$BATCH_ID)"
+Write-Step "REPAIR COMPLETE (run_id=$RUN_ID)"
 
 if ($LOG_ONLY) {
     Write-Host ""
     Write-Host "LOG-ONLY MODE REMINDER:" -ForegroundColor Yellow
-    Write-Host "  - No SOAP calls were made to HRP for batch $BATCH_ID" -ForegroundColor Yellow
-    Write-Host "  - cpe_repair rows for this batch may still show pending depending on the call's post-call SQL" -ForegroundColor Yellow
+    Write-Host "  - No SOAP calls were made to HRP for run $RUN_ID" -ForegroundColor Yellow
+    Write-Host "  - cpe_repair rows for this run may still show pending depending on the call's post-call SQL" -ForegroundColor Yellow
     Write-Host "  - To re-run for real: set LOG_ONLY=false in env.properties, then:" -ForegroundColor Yellow
-    Write-Host "      .\run_repair.ps1 -BatchId $BATCH_ID" -ForegroundColor Yellow
+    Write-Host "      .\run_repair.ps1 -RunId $RUN_ID" -ForegroundColor Yellow
 }
 
 Write-RunSummary -Status "SUCCESS"

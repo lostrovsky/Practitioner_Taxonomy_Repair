@@ -16,8 +16,11 @@ and Claim_Provider_Data_Loader.
 PREREQUISITES
 ============================================================
 * Java 21 JRE or JDK on PATH (or via JAVA_HOME).
-* SQL Server reachable, with cpe_master and cpe_xref schemas already
-  populated (i.e., the daily pipeline has been running).
+* SQL Server reachable, with cpe_master populated by the daily pipeline
+  AND read access to [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY] (the
+  same taxonomy-name lookup source the pipeline's sp_resolve_taxonomy_names
+  uses; overridable via install.config TAXONOMY_LOOKUP_TABLE for
+  non-default environments).
 * An existing Claim Provider Data Pipeline install: specifically the
   Claim_Provider_Data_Loader\generic-hrp-ws-call.jar must already be
   deployed at <base>\Claim_Provider_Data_Loader\.
@@ -55,8 +58,10 @@ STEP 2: EDIT install.config
 Open install.config in the extracted temp directory and fill in:
 
   DB_URL                      JDBC connection string for SQL Server
-  DB_USER, DB_PASSWORD        DB credentials (must have SELECT on cpe_master.*
-                              and cpe_xref.taxonomy, INSERT/UPDATE on cpe_repair.*)
+  DB_USER, DB_PASSWORD        DB credentials (must have SELECT on cpe_master.*,
+                              SELECT on the taxonomy lookup table -- defaults to
+                              [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY] --
+                              and INSERT/UPDATE on cpe_repair.*)
   WS_BASE_URL                 HRP connector base URL (no trailing slash)
   CONNECTOR_ADMIN_PASSWORD    Password for the connector_admin WS user
   LOG_ONLY                    true (recommended for first run) or false
@@ -66,8 +71,12 @@ Open install.config in the extracted temp directory and fill in:
 Optional:
   NPI_QUERY                   custom SELECT for the auto-derive path
                               (returns one column of NPIs; verbatim)
-  DB_MASTER_SCHEMA / DB_REPAIR_SCHEMA / DB_XREF_SCHEMA
-                              schema overrides (defaults: cpe_master / cpe_repair / cpe_xref)
+  DB_MASTER_SCHEMA / DB_REPAIR_SCHEMA
+                              schema overrides (defaults: cpe_master / cpe_repair)
+  TAXONOMY_LOOKUP_TABLE / TAXONOMY_CODE_COLUMN / TAXONOMY_NAME_COLUMN
+                              override the taxonomy-name lookup. Defaults match
+                              the daily pipeline: [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]
+                              with PROVIDER_TAXONOMY_CODE / PROVIDER_TAXONOMY_NAME
 
 Tip: most values can be copy-pasted from your daily pipeline's
 env.properties.
@@ -119,8 +128,8 @@ Typical first run (LOG_ONLY mode -- inspect SOAP envelopes; no HRP calls):
         -> jar stages nothing, logs what it would stage. No loader call.
 
     .\run_repair.ps1 -NpiFile pilot.txt
-        -> jar stages a batch. Loader runs (LOG_ONLY honors env.properties).
-           Captures BATCH_ID, then invokes the loader. Watch the SOAP in the
+        -> jar stages a run. Loader runs (LOG_ONLY honors env.properties).
+           Captures RUN_ID, then invokes the loader. Watch the SOAP in the
            log; verify it looks right.
 
 When ready for real:
@@ -130,15 +139,15 @@ When ready for real:
         -> Real amends pushed to HRP. Spot-check the affected practitioners
            in HRP.
 
-For the full batch (no --npi-file -> auto-derive query, or NPI_QUERY override
-if set in install.config):
+For the full population (no --npi-file -> auto-derive query, or NPI_QUERY
+override if set in install.config):
 
-    .\run_repair.ps1 -Description "Production repair batch"
+    .\run_repair.ps1 -Description "Production repair run"
 
-Resume mode (re-run only the loader against an existing batch_id; useful
+Resume mode (re-run only the loader against an existing run_id; useful
 after a mid-run loader failure):
 
-    .\run_repair.ps1 -BatchId 7
+    .\run_repair.ps1 -RunId 7
 
 ============================================================
 STEP 5: VERIFY
@@ -147,7 +156,7 @@ After a real (non-LOG_ONLY) run:
 
     SELECT status, COUNT(*)
     FROM cpe_repair.practitioner_repair
-    WHERE batch_id = <n>
+    WHERE run_id = <n>
     GROUP BY status;
 
 Expected: 'loaded' for everything the loader pushed; 'skipped' for
@@ -198,6 +207,8 @@ ROLLBACK / UNINSTALL
    leave the schema in place; it's harmless.)
 
 cpe_master, cpe_load, cpe and the daily pipeline are untouched
-throughout. This tool reads cpe_master and cpe_xref (read-only) and
+throughout. This tool reads cpe_master.* (read-only) plus the
+configured taxonomy lookup table (defaults to the pipeline's
+[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY], read-only) and
 writes only to cpe_repair.
 ============================================================

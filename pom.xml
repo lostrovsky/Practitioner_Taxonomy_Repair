@@ -6,7 +6,7 @@
 
   <groupId>com.ust.utils</groupId>
   <artifactId>practitioner-taxonomy-repair</artifactId>
-  <version>1.3.0</version>
+  <version>1.5.0</version>
   <packaging>jar</packaging>
 
   <name>Practitioner Taxonomy Repair</name>

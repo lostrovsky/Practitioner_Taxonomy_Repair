@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.4.0](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- mirrors the daily pipeline's install pattern (install.config + install.ps1) and adds a `run_repair.ps1` orchestrator that handles both the stage step and the loader call.
+**Latest release:** [v1.5.0](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- mirrors the daily pipeline's install pattern (install.config + install.ps1) and adds a `run_repair.ps1` orchestrator that handles both the stage step and the loader call.
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -21,10 +21,10 @@ For each NPI in the input list:
 
 ## Footprint
 
-- Reads (read-only): `cpe_master.practitioner`, `cpe_master.practitioner_taxonomy`, `cpe_xref.taxonomy`
-- Writes: `cpe_repair.batch`, `cpe_repair.practitioner_repair`, `cpe_repair.practitioner_taxonomy` only
+- Reads (read-only): `cpe_master.practitioner`, `cpe_master.practitioner_taxonomy`, `[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]` (same taxonomy-name source the daily pipeline's `sp_resolve_taxonomy_names` uses; overridable via `db.taxonomy.lookup.*` properties)
+- Writes: `cpe_repair.repair_run`, `cpe_repair.practitioner_repair`, `cpe_repair.practitioner_taxonomy` only
 - Does **not** modify any code in sibling projects (`Claim_Provider_Data_Extractor`, `Generic_HRP_WS_Call`, `Claim_Provider_Data_Pipeline`)
-- Does **not** consume a `cpe_load.load_run.run_id`. Uses its own `cpe_repair.batch.batch_id` IDENTITY sequence.
+- Does **not** consume a `cpe_load.load_run.run_id`. Uses its own `cpe_repair.repair_run.run_id` IDENTITY sequence (same column name, different schema — schema isolation prevents PK collision).
 
 ## Quick start
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.4.0\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.5.0\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.4.0
+   cd C:\temp\ptr_v1.5.0
    .\install.ps1
    ```
 
@@ -60,10 +60,10 @@ cd <base>\Practitioner_Taxonomy_Repair
 .\run_repair.ps1 -Description "Production repair batch"
 
 # Resume a previous batch (re-invoke loader only; TVF skips already-loaded/skipped rows)
-.\run_repair.ps1 -BatchId 7
+.\run_repair.ps1 -RunId 7
 ```
 
-`run_repair.ps1` calls the repair jar first, captures the `BATCH_ID` from its stdout, then invokes `generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<batch> --env-file=...\env.properties`. End-of-run summary prints per-status row counts from `cpe_repair.practitioner_repair`. Concurrency-locked; transcript log written to `repair_<timestamp>.log` next to the script.
+`run_repair.ps1` calls the repair jar first, captures the `RUN_ID` from its stdout, then invokes `generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<n> --env-file=...\env.properties`. End-of-run summary prints per-status row counts from `cpe_repair.practitioner_repair`. Concurrency-locked; transcript log written to `repair_<timestamp>.log` next to the script.
 
 ### Restricting to specific NPIs
 

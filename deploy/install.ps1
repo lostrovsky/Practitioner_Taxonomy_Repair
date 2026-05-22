@@ -71,7 +71,13 @@ foreach ($tok in ($config["WS_RETRY_HTTP_CODES"] -split ",")) {
 # Schema defaults
 $DB_MASTER_SCHEMA = if ($config["DB_MASTER_SCHEMA"] -and $config["DB_MASTER_SCHEMA"].Trim() -ne "") { $config["DB_MASTER_SCHEMA"].Trim() } else { "cpe_master" }
 $DB_REPAIR_SCHEMA = if ($config["DB_REPAIR_SCHEMA"] -and $config["DB_REPAIR_SCHEMA"].Trim() -ne "") { $config["DB_REPAIR_SCHEMA"].Trim() } else { "cpe_repair" }
-$DB_XREF_SCHEMA   = if ($config["DB_XREF_SCHEMA"]   -and $config["DB_XREF_SCHEMA"].Trim()   -ne "") { $config["DB_XREF_SCHEMA"].Trim()   } else { "cpe_xref"   }
+
+# Taxonomy lookup overrides (blank => jar uses its built-in defaults that match
+# the daily pipeline: [HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY] /
+# PROVIDER_TAXONOMY_CODE / PROVIDER_TAXONOMY_NAME).
+$TAXONOMY_LOOKUP_TABLE = if ($config["TAXONOMY_LOOKUP_TABLE"]) { $config["TAXONOMY_LOOKUP_TABLE"].Trim() } else { "" }
+$TAXONOMY_CODE_COLUMN  = if ($config["TAXONOMY_CODE_COLUMN"])  { $config["TAXONOMY_CODE_COLUMN"].Trim()  } else { "" }
+$TAXONOMY_NAME_COLUMN  = if ($config["TAXONOMY_NAME_COLUMN"])  { $config["TAXONOMY_NAME_COLUMN"].Trim()  } else { "" }
 
 # ============================================================
 # Validate package layout (extracted release zip)
@@ -234,9 +240,16 @@ $repairPropsLines = @(
     "",
     "# --- Schemas ---",
     "db.master.schema=$DB_MASTER_SCHEMA",
-    "db.repair.schema=$DB_REPAIR_SCHEMA",
-    "db.xref.schema=$DB_XREF_SCHEMA"
+    "db.repair.schema=$DB_REPAIR_SCHEMA"
 )
+# Taxonomy lookup overrides -- only emit if the operator set them in install.config;
+# otherwise the jar's built-in defaults match the daily pipeline's source.
+if ($TAXONOMY_LOOKUP_TABLE -or $TAXONOMY_CODE_COLUMN -or $TAXONOMY_NAME_COLUMN) {
+    $repairPropsLines += @("", "# --- Taxonomy lookup overrides (from install.config) ---")
+    if ($TAXONOMY_LOOKUP_TABLE) { $repairPropsLines += "db.taxonomy.lookup.table=$TAXONOMY_LOOKUP_TABLE" }
+    if ($TAXONOMY_CODE_COLUMN)  { $repairPropsLines += "db.taxonomy.lookup.code_column=$TAXONOMY_CODE_COLUMN" }
+    if ($TAXONOMY_NAME_COLUMN)  { $repairPropsLines += "db.taxonomy.lookup.name_column=$TAXONOMY_NAME_COLUMN" }
+}
 if ($npiQuery) {
     $repairPropsLines += @(
         "",
@@ -323,7 +336,7 @@ Write-Host "  2. Run the repair orchestrator:"
 Write-Host "       cd `"$REPAIR_DIR`""
 Write-Host "       .\run_repair.ps1                                # auto-derive NPI list, real run"
 Write-Host "       .\run_repair.ps1 -NpiFile pilot.txt -DryRun     # dry-run a pilot list"
-Write-Host "       .\run_repair.ps1 -BatchId 7                     # resume the loader for batch 7"
+Write-Host "       .\run_repair.ps1 -RunId 7                       # resume the loader for run 7"
 Write-Host ""
 Write-Host "  See INSTALL.txt and README.md for detail; CLAUDE_NOTES.md for design notes."
 Write-Host ""

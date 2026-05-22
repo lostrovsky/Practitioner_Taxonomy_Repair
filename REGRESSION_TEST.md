@@ -15,7 +15,10 @@ justify the script. Procedure below is short enough to run by hand in ~5 min.
 
 - SQL Server running on localhost; `INTEGRATION_PLUS_DB` populated by the daily
   pipeline (so `cpe_master.practitioner_taxonomy` has NPPES-source rows and
-  `cpe_xref.taxonomy` is populated with code->display_name mappings).
+  `[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]` is accessible to the
+  test DB user -- this is the canonical taxonomy code->name source the
+  daily pipeline uses; the repair tool queries it for SOAP `<codeName>`
+  display names).
 - `generic-hrp-ws-call.jar` built locally at
   `~/VSCode_Projects/Generic_HRP_WS_Call/target/generic-hrp-ws-call-1.0.0-jar-with-dependencies.jar`
   (or pointing at any pre-deployed loader install).
@@ -187,8 +190,8 @@ After Step 5's inject run produced a `pending` row, re-run the loader against
 that same batch:
 
 ```powershell
-# Replace <n> with the batch_id from Step 5
-.\run_repair.ps1 -BatchId <n>
+# Replace <n> with the run_id from Step 5
+.\run_repair.ps1 -RunId <n>
 ```
 
 **Expected:** STEP 2 skipped (resume banner printed); STEP 3 runs the loader
@@ -209,11 +212,11 @@ Remove-Item C:\Tools\PTR_smoke,C:\Tools\PTR_smoke_extracted -Recurse -Force
 -- Remove regression-test batches from cpe_repair (identifiable by description)
 DELETE FROM cpe_repair.practitioner_taxonomy
  WHERE entity_id IN (SELECT entity_id FROM cpe_repair.practitioner_repair
-                     WHERE batch_id IN (SELECT batch_id FROM cpe_repair.batch
+                     WHERE run_id IN (SELECT run_id FROM cpe_repair.repair_run
                                         WHERE description LIKE 'regression:%'));
 DELETE FROM cpe_repair.practitioner_repair
- WHERE batch_id IN (SELECT batch_id FROM cpe_repair.batch WHERE description LIKE 'regression:%');
-DELETE FROM cpe_repair.batch WHERE description LIKE 'regression:%';
+ WHERE run_id IN (SELECT run_id FROM cpe_repair.repair_run WHERE description LIKE 'regression:%');
+DELETE FROM cpe_repair.repair_run WHERE description LIKE 'regression:%';
 ```
 
 ## Important notes
