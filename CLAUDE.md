@@ -24,5 +24,5 @@ This tool fixes that. It re-fetches NPPES live for affected practitioners, stage
 
 - Does NOT modify any code in any other project
 - Does NOT read or write `cpe.*`, `cpe_load.*`, or `cpe_master.*` for writes (reads from `cpe_master.practitioner` and `cpe_master.practitioner_taxonomy` are read-only and necessary)
-- Does NOT consume a `cpe_load.load_run.run_id`. Uses its own `cpe_repair.batch.batch_id` IDENTITY sequence.
+- Does NOT consume a `cpe_load.load_run.run_id`. Uses its own `cpe_repair.repair_run.run_id` IDENTITY sequence (same column name as the pipeline -- different schema means no PK collision).
 - Database footprint is the new `cpe_repair` schema only.

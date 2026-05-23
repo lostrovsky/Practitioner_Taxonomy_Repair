@@ -10,42 +10,46 @@
 
 ## Production setup
 
-> **Recommended path** (since v1.1.0): download the release zip from
+> **Recommended path** (since v1.4.0): download the release zip from
 > https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases, extract
-> it, fill the three `db.*` lines in `PractitionerTaxonomyRepair.properties`,
-> then:
+> it to a temp directory, fill in `install.config` (DB connection, WS URL,
+> sqlcmd path), then:
 >
->     .\install.ps1 -LoaderInstallPath <existing install>\Claim_Provider_Data_Loader
+>     .\install.ps1
 >
-> That one command applies the DDL, copies the call folder, and finishes the
-> setup. The manual steps below remain as the fallback / detailed reference
-> (and are still needed if you're building from source instead of using the
-> release zip).
+> When prompted, point it at your existing pipeline base directory (the one
+> that already contains `Claim_Provider_Data_Loader\`). The installer creates
+> a `Practitioner_Taxonomy_Repair\` sibling, generates `env.properties` +
+> `PractitionerTaxonomyRepair.properties` from install.config, copies the
+> call folder into the loader, and optionally applies the DDL. See bundled
+> `INSTALL.txt` for the full reference.
+>
+> The manual steps below remain as a fallback / build-from-source path.
 
-- [ ] **Apply DDL to production DB:** `sqlcmd -S <server> -d <db> -U <user> -P <pwd> -i sql/create_cpe_repair_objects.sql`. Idempotent; safe to re-run.
+- [ ] **Apply DDL to production DB:** `sqlcmd -S <server> -d <db> -U <user> -P <pwd> -i sql/create_cpe_repair_objects.sql`. Idempotent; safe to re-run; includes embedded v1.x → v1.5 migration.
 - [ ] **Build the jar on the deploy machine** (only if not using the release zip): `mvn clean package -DskipTests`. Requires `claim-provider-data-extractor:1.0.0` in local m2 (run `mvn install -DskipTests` from that project first).
-- [ ] **Fill in real DB credentials** in `PractitionerTaxonomyRepair.properties` (in the extracted release dir, or `target/` if building from source; or pass `--properties-file=<path>` to point at a different config).
+- [ ] **Generate / hand-edit** `PractitionerTaxonomyRepair.properties` with real `db.url`/`db.user`/`db.password` + optional `db.npi_query` and `db.taxonomy.lookup.*` overrides (install.ps1 generates this from install.config; only edit by hand if building from source).
 - [ ] **Copy the call folder** `calls/practitioner_taxonomy_repair/` onto your loader install at `<install>/Claim_Provider_Data_Loader/practitioner_taxonomy_repair/`.
 
 ## First production run
 
 - [ ] **Dry-run sanity check:** `java -jar ... --dry-run`. Confirms NPI count and that NPPES is reachable. No DB writes.
-- [ ] **Stage a small pilot batch first:** pick 2–3 known-affected NPIs, run with `--npi-file=pilot.txt`. Verify rows in `cpe_repair.practitioner_repair` and `cpe_repair.practitioner_taxonomy`.
-- [ ] **Run loader in LOG_ONLY mode** against the pilot batch_id: `... practitioner_taxonomy_repair --RUN_ID=<n> --LOG_ONLY=true`. Inspect the SOAP envelopes in the log. Confirm correct primary, no fields beyond hcc_id + taxonomies.
-- [ ] **Run loader for real** against the pilot batch (drop `--LOG_ONLY=true`). Verify HRP-side: the corrected practitioners now show the right primary in HRP UI/API. `cpe_repair.practitioner_repair.status = 'loaded'` for the pilot rows.
-- [ ] **If pilot succeeds, stage the full batch** (no `--npi-file`) and run the loader.
+- [ ] **Stage a small pilot run first:** pick 2–3 known-affected NPIs, run with `.\run_repair.ps1 -NpiFile pilot.txt`. Verify rows in `cpe_repair.practitioner_repair` and `cpe_repair.practitioner_taxonomy`.
+- [ ] **Run with LOG_ONLY=true** against the pilot (set in env.properties or pass `-LogOnlyOverride`). Inspect the SOAP envelopes in the loader log. Confirm correct primary, no fields beyond hcc_id + taxonomies.
+- [ ] **Run for real** against the pilot (LOG_ONLY=false). Verify HRP-side: the corrected practitioners now show the right primary in HRP UI/API. `cpe_repair.practitioner_repair.status = 'loaded'` for the pilot rows.
+- [ ] **If pilot succeeds, stage the full population** (no `-NpiFile`) and let `run_repair.ps1` invoke the loader for the new run_id.
 
 ## Post-run verification
 
-- [ ] **Verify all rows loaded:** `SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE batch_id = <n> GROUP BY status` — should be all `loaded`. Investigate any `failed` rows via `error_message`.
+- [ ] **Verify all rows loaded:** `SELECT status, COUNT(*) FROM cpe_repair.practitioner_repair WHERE run_id = <n> GROUP BY status` — should be `loaded` (sent) + `skipped` (matched master, no amend needed). Investigate any `failed` rows via `error_message`.
 - [ ] **Spot-check HRP** against 5–10 random repaired practitioners — confirm primary taxonomy matches NPPES live.
-- [ ] **Document the run** in CLAUDE_NOTES.md "State at Time of Notes" section (batch_id, count, date, any anomalies).
+- [ ] **Document the run** in CLAUDE_NOTES.md "State at Time of Notes" section (run_id, count, date, any anomalies).
 
 ## Future enhancements (nice-to-have, not blocking)
 
-- [ ] **Resume mode:** if a batch partially loaded, allow re-running the loader to pick up only `pending` / `failed` rows. The TVF already filters on `status <> 'loaded'`, so resume is essentially free — just verify behavior end-to-end.
-- [ ] **Concurrency for NPPES lookups.** Currently sequential. For a large batch (1000+ NPIs at ~500ms each = 8+ minutes), parallel HTTP calls would be a meaningful speedup. NPPES has rate limits — keep it modest (e.g., 5 concurrent).
-- [ ] **Local cache for `cpe_xref.taxonomy` lookups** if running multiple batches back-to-back. Currently fresh DB query per run.
+- [ ] **Resume mode** — already shipped in v1.4.0 (`run_repair.ps1 -RunId <n>` skips the stage phase and re-invokes the loader; TVF filters `status NOT IN ('loaded','skipped')`). Verify end-to-end against a real partial-loader-failure scenario.
+- [ ] **Concurrency for NPPES lookups.** Currently sequential. For a large run (1000+ NPIs at ~500ms each = 8+ minutes), parallel HTTP calls would be a meaningful speedup. NPPES has rate limits — keep it modest (e.g., 5 concurrent).
+- [ ] **Local cache for the taxonomy lookup** if running multiple runs back-to-back. Currently re-queries `[HRDW_REPLICA].[PAYOR_DW].[PROVIDER_TAXONOMY]` on every invocation.
 - [ ] **Standalone diff-report mode** (the in-line diff was built into the staging path in v1.3.0; this would be a separate read-only report). Show what would change in HRP vs current `cpe_master` state without writing anything to `cpe_repair`. `--dry-run` partially covers this today by logging the staged-vs-skipped sample without inserting; a richer human-readable diff per practitioner is the unmet part.
 
 ## Done
