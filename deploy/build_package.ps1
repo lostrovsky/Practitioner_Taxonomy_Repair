@@ -71,6 +71,7 @@ Copy-Item $jar "$STAGE_DIR\$jarName"
 # DDL
 New-Item -Path "$STAGE_DIR\sql" -ItemType Directory | Out-Null
 Copy-Item "$PROJECT_ROOT\sql\create_cpe_repair_objects.sql" "$STAGE_DIR\sql\"
+Copy-Item "$PROJECT_ROOT\sql\drop_cpe_repair_objects.sql"   "$STAGE_DIR\sql\"
 
 # Call folder (lives WITH this project, not in the Pipeline repo)
 New-Item -Path "$STAGE_DIR\calls" -ItemType Directory | Out-Null

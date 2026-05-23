@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.5.0](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- mirrors the daily pipeline's install pattern (install.config + install.ps1) and adds a `run_repair.ps1` orchestrator that handles both the stage step and the loader call.
+**Latest release:** [v1.6.0](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- mirrors the daily pipeline's install pattern (install.config + install.ps1) and adds a `run_repair.ps1` orchestrator that handles both the stage step and the loader call.
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.5.0\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.0\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.5.0
+   cd C:\temp\ptr_v1.6.0
    .\install.ps1
    ```
 
@@ -57,7 +57,7 @@ cd <base>\Practitioner_Taxonomy_Repair
 .\run_repair.ps1 -NpiFile pilot.txt
 
 # Full batch (auto-derive NPI list; honors db.npi_query if set in install.config)
-.\run_repair.ps1 -Description "Production repair batch"
+.\run_repair.ps1 -Description "Production repair run"
 
 # Resume a previous batch (re-invoke loader only; TVF skips already-loaded/skipped rows)
 .\run_repair.ps1 -RunId 7

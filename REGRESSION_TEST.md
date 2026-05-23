@@ -107,7 +107,7 @@ cd C:\Tools\PTR_smoke\Practitioner_Taxonomy_Repair
 - Per-NPI log lines: `master already matches NPPES (primary=...; NPPES codes [...] all present in master) -- recording skip`
 - Decision summary: `N staged for amend; 5 skipped as already-matching; ...`
 - Loader log line: `Total groups: 0` (TVF correctly excludes status='skipped')
-- Run summary: `Status: SUCCESS`, `Batch <n> row counts by status: skipped 5`
+- Run summary: `Status: SUCCESS`, `Run <n> row counts by status: skipped 5`
 - exit 0
 
 Note: if the daily pipeline has been running cleanly post-v1.4.1, most/all
@@ -157,7 +157,7 @@ Write a one-line pilot file and run:
   - `<secondarySpecialty><codeName>Family Medicine Physician</codeName></secondarySpecialty>` (2nd NPPES code 207Q00000X)
 - Post-call SQL log line: `EXEC [cpe_repair].[sp_mark_practitioner_repair_loaded] @entity_id = <n>, @success = 1, @error_message = NULL`
   (Prepared but not executed in LOG_ONLY -- "SQL executor (dry-run)").
-- Run summary: `Batch <n> row counts by status: pending 1`
+- Run summary: `Run <n> row counts by status: pending 1`
 - exit 0
 
 Restore and verify:

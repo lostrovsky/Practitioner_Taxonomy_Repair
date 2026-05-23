@@ -375,6 +375,23 @@ if ($loaderExit -ne 0) {
 
 Write-Step "REPAIR COMPLETE (run_id=$RUN_ID)"
 
+# Finalize the run: aggregate practitioner_repair statuses into repair_run.status
+# (completed / partial / failed / pending). Best-effort -- a failure here doesn't
+# fail the overall run.
+try {
+    $env:SQLCMDPASSWORD = $DB_PASSWORD
+    & $SQLCMD -b -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -Q "EXEC cpe_repair.sp_finalize_repair_run @run_id = $RUN_ID" 2>&1 | Out-Host
+    $env:SQLCMDPASSWORD = $null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  repair_run.status finalized" -ForegroundColor Green
+    } else {
+        Write-Host "  WARNING: sp_finalize_repair_run returned $LASTEXITCODE -- repair_run.status may stay 'pending'" -ForegroundColor Yellow
+    }
+} catch {
+    $env:SQLCMDPASSWORD = $null
+    Write-Host "  WARNING: could not finalize repair_run: $_" -ForegroundColor Yellow
+}
+
 if ($LOG_ONLY) {
     Write-Host ""
     Write-Host "LOG-ONLY MODE REMINDER:" -ForegroundColor Yellow

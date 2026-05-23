@@ -154,70 +154,59 @@ public class PractitionerTaxonomyRepair {
                     logger.warning("NPI " + npi + ": NPPES not found or returned no taxonomies -- skipping");
                     continue;
                 }
-
                 String nppesPrimary = r.getPrimaryTaxonomyCode();
                 if (nppesPrimary == null) {
                     logger.warning("NPI " + npi + ": NPPES result has no primary marker; cannot evaluate match -- skipping");
                     nppesNotFound++;
                     continue;
                 }
-                List<String> nppesCodes  = r.getTaxonomyCodes();
-                Set<String>  nppesCodeSet = new LinkedHashSet<>(nppesCodes);
 
                 MasterSnapshot master = masterByNpi.getOrDefault(npi, MasterSnapshot.EMPTY);
-
-                // "Same" check: every NPPES code is already in master AND master's primary code
-                // matches NPPES's primary code. If both hold, no amend is needed; record a skip.
-                boolean masterHasAllNppes = master.codes.containsAll(nppesCodeSet);
-                boolean primaryMatches    = nppesPrimary.equals(master.primaryCode);
-                if (masterHasAllNppes && primaryMatches) {
-                    String reason = "master already matches NPPES (primary=" + nppesPrimary +
-                            "; NPPES codes " + nppesCodes + " all present in master)";
-                    logger.info("NPI " + npi + ": " + reason + " -- recording skip, no amend will be sent");
-                    skipped.add(new SkipRow(npi, hccId, reason));
-                    continue;
+                Decision d = decide(nppesPrimary, r.getTaxonomyCodes(), master);
+                logger.info("NPI " + npi + ": " + d.reason);
+                if (d.kind == Decision.Kind.MATCH) {
+                    skipped.add(new SkipRow(npi, hccId, d.reason));
+                } else { // STAGE
+                    staged.add(new RepairRow(npi, hccId, d.staged));
                 }
-
-                // Mismatch -- stage an amend. Merge order: NPPES primary, NPPES secondary (= 1st
-                // non-primary NPPES code, if any), remaining NPPES codes, then master codes not
-                // already covered. Dedup by code; NPPES wins on the primary designation.
-                String nppesSecondary = null;
-                for (String c : nppesCodes) {
-                    if (!c.equals(nppesPrimary)) { nppesSecondary = c; break; }
-                }
-
-                Set<String>         seen     = new LinkedHashSet<>();
-                List<TaxonomyEntry> combined = new ArrayList<>();
-                TaxonomyEntry primaryEntry = new TaxonomyEntry(nppesPrimary, "NPPES");
-                primaryEntry.isPrimary = true;
-                combined.add(primaryEntry);
-                seen.add(nppesPrimary);
-                if (nppesSecondary != null && seen.add(nppesSecondary)) {
-                    TaxonomyEntry secondaryEntry = new TaxonomyEntry(nppesSecondary, "NPPES");
-                    secondaryEntry.isSecondary = true;
-                    combined.add(secondaryEntry);
-                }
-                for (String c : nppesCodes) {
-                    if (seen.add(c)) combined.add(new TaxonomyEntry(c, "NPPES"));
-                }
-                for (String c : master.codes) {
-                    if (seen.add(c)) combined.add(new TaxonomyEntry(c, "master"));
-                }
-
-                int seq = 1;
-                for (TaxonomyEntry e : combined) e.seqNum = seq++;
-
-                String why = !primaryMatches
-                        ? "primary mismatch (master=" + master.primaryCode + ", NPPES=" + nppesPrimary + ")"
-                        : "NPPES has codes not in master";
-                logger.info("NPI " + npi + ": staging amend -- " + why);
-
-                staged.add(new RepairRow(npi, hccId, combined));
             }
 
+            // 4. Resolve taxonomy_name for every staged code (single batched lookup).
+            //    Done BEFORE the final decision summary so the H3/O1 fail-fast can downgrade
+            //    practitioners whose primary code doesn't resolve. Also runs in --dry-run so
+            //    unresolvable codes surface early (instead of biting on the real run).
+            Set<String> allCodes = new HashSet<>();
+            for (RepairRow rr : staged) {
+                for (TaxonomyEntry e : rr.taxonomies) allCodes.add(e.taxonomyCode);
+            }
+            Map<String, String> codeToName = lookupTaxonomyNames(allCodes);
+
+            // H3/O1 fail-fast: if a staged practitioner's NPPES primary code didn't resolve in
+            // the taxonomy lookup table, the SOAP <primarySpecialty> would render empty (the
+            // template's data-optional drops the tag) and HRP would receive an amend with no
+            // primary specialty -- silently undoing the whole point of the repair. Demote those
+            // to skip with a clear reason instead of letting them through.
+            int unresolvedPrimary = 0;
+            List<RepairRow> filteredStaged = new ArrayList<>(staged.size());
+            for (RepairRow rr : staged) {
+                String primaryCode = null;
+                for (TaxonomyEntry e : rr.taxonomies) if (e.isPrimary) { primaryCode = e.taxonomyCode; break; }
+                if (primaryCode != null && !codeToName.containsKey(primaryCode)) {
+                    String reason = "primary taxonomy code " + primaryCode + " not found in " + taxonomyLookupTable +
+                            " -- cannot render a valid SOAP <primarySpecialty>, refusing to stage";
+                    logger.warning("NPI " + rr.npi + ": " + reason);
+                    skipped.add(new SkipRow(rr.npi, rr.hccId, reason));
+                    unresolvedPrimary++;
+                } else {
+                    filteredStaged.add(rr);
+                }
+            }
+            staged = filteredStaged;
+
+            int matchSkipped = skipped.size() - unresolvedPrimary;
             logger.info(String.format(
-                    "Decision summary: %d staged for amend; %d skipped as already-matching; %d NPPES-not-found/no-primary; %d not-in-master (total NPIs considered: %d)",
-                    staged.size(), skipped.size(), nppesNotFound, notInMaster, npis.size()));
+                    "Decision summary: %d staged for amend; %d skipped (%d already-matching, %d primary-name-not-resolved); %d NPPES-not-found/no-primary; %d not-in-master (total NPIs considered: %d)",
+                    staged.size(), skipped.size(), matchSkipped, unresolvedPrimary, nppesNotFound, notInMaster, npis.size()));
 
             if (dryRun) {
                 logger.info("--dry-run set: skipping all INSERTs.");
@@ -238,13 +227,6 @@ public class PractitionerTaxonomyRepair {
                 logger.info("Nothing to persist (no staged amends, no skipped rows). Exiting without creating a run.");
                 return;
             }
-
-            // 4. Resolve taxonomy_name for every staged code (single batched lookup; skipped rows have no taxonomies).
-            Set<String> allCodes = new HashSet<>();
-            for (RepairRow rr : staged) {
-                for (TaxonomyEntry e : rr.taxonomies) allCodes.add(e.taxonomyCode);
-            }
-            Map<String, String> codeToName = lookupTaxonomyNames(allCodes);
 
             // 5. Persist: one run + N pending practitioner_repair (+ M practitioner_taxonomy)
             //              + K skipped practitioner_repair (with status='skipped' and reason).
@@ -313,19 +295,101 @@ public class PractitionerTaxonomyRepair {
             throw new IllegalArgumentException("Invalid schema name: " + s);
     }
 
-    /** Bare SQL identifier (column or unbracketed table name). */
+    /**
+     * Bare SQL identifier (column or unbracketed table name). The character set is the C-style
+     * identifier rule, not the full set SQL Server actually permits in brackets.
+     * <p>
+     * Trust model: the values flow from operator-edited install.config / properties; this
+     * validator's job is to surface a typo as a clear error early, not to defend against a
+     * malicious config (the same operator owns sqlcmd already). A tighter regex would reject
+     * legal SQL identifiers like names with spaces/hyphens; we accept that limitation here.
+     */
     private static void validateIdentifier(String s) {
         if (s == null || !s.matches("^[a-zA-Z_][a-zA-Z0-9_]*$"))
             throw new IllegalArgumentException("Invalid SQL identifier: " + s);
     }
 
-    /** Up-to-3-part qualified table name; each part may be bare (a-z0-9_) or bracketed [...]. */
+    /**
+     * Up-to-3-part qualified table name; each part is either a bare identifier or a bracketed
+     * name whose body is restricted to [A-Za-z0-9_ ] (alphanumerics + underscore + space).
+     * That charset rejects the SQL injection vectors -- semicolons, comment markers (-- or
+     * /* *&#47;), quotes, parentheses, brackets-inside-brackets, newlines -- while still
+     * accepting realistic SQL Server bracketed names (including "Name With Spaces"). Same
+     * trust-model caveat as validateIdentifier above.
+     */
     private static void validateQualifiedTableName(String s) {
         if (s == null) throw new IllegalArgumentException("Invalid table name: null");
-        // Part = [bracketed-name] OR bare-identifier. Joined by dots, 1-3 parts.
-        String part = "(?:\\[[^\\[\\]]+\\]|[a-zA-Z_][a-zA-Z0-9_]*)";
+        String part = "(?:\\[[A-Za-z0-9_ ]+\\]|[a-zA-Z_][a-zA-Z0-9_]*)";
         if (!s.matches("^" + part + "(?:\\." + part + "){0,2}$"))
             throw new IllegalArgumentException("Invalid qualified table name: " + s);
+    }
+
+    // ============================================================
+    // Decision logic (pure, side-effect-free, unit-testable)
+    // ============================================================
+    /**
+     * Given live NPPES taxonomy data and the current cpe_master snapshot for one NPI,
+     * decide whether master already matches NPPES (skip, no amend) or differs (stage an
+     * amend with the merged taxonomy list).
+     * <p>
+     * Pre-conditions (caller's responsibility): the NPI exists in cpe_master.practitioner
+     * (we have a hcc_id), NPPES returned at least one taxonomy, and {@code nppesPrimary}
+     * is non-null. This function has no side effects, no DB / NPPES / logger calls --
+     * it's purely a function of its arguments. Designed for direct JUnit testing.
+     *
+     * @param nppesPrimary NPPES's primary taxonomy code (non-null)
+     * @param nppesCodes   NPPES's full taxonomy code list (non-empty, must contain nppesPrimary)
+     * @param master       master snapshot for the same NPI (may be MasterSnapshot.EMPTY)
+     * @return MATCH (skip with reason) or STAGE (with merged taxonomy list and reason)
+     */
+    static Decision decide(String nppesPrimary, List<String> nppesCodes, MasterSnapshot master) {
+        Set<String> nppesCodeSet = new LinkedHashSet<>(nppesCodes);
+
+        // "Same" check: every NPPES code is already in master AND master's is_primary=1 code
+        // is the same code NPPES marks primary. Master may have additional codes NPPES doesn't
+        // return -- that's still "same" (no signal NPPES wants them removed; daily pipeline
+        // re-derives master from claims+NPPES anyway).
+        boolean masterHasAllNppes = master.codes.containsAll(nppesCodeSet);
+        boolean primaryMatches    = nppesPrimary.equals(master.primaryCode);
+        if (masterHasAllNppes && primaryMatches) {
+            String reason = "master already matches NPPES (primary=" + nppesPrimary +
+                    "; NPPES codes " + nppesCodes + " all present in master) -- recording skip, no amend will be sent";
+            return Decision.match(reason);
+        }
+
+        // Mismatch -- build merged taxonomy list. Order: NPPES primary, NPPES secondary
+        // (= 1st non-primary NPPES code, if any), remaining NPPES codes, then master codes
+        // not already covered. Dedup by code; NPPES wins on the primary designation.
+        String nppesSecondary = null;
+        for (String c : nppesCodes) {
+            if (!c.equals(nppesPrimary)) { nppesSecondary = c; break; }
+        }
+
+        Set<String>         seen     = new LinkedHashSet<>();
+        List<TaxonomyEntry> combined = new ArrayList<>();
+        TaxonomyEntry primaryEntry = new TaxonomyEntry(nppesPrimary, "NPPES");
+        primaryEntry.isPrimary = true;
+        combined.add(primaryEntry);
+        seen.add(nppesPrimary);
+        if (nppesSecondary != null && seen.add(nppesSecondary)) {
+            TaxonomyEntry secondaryEntry = new TaxonomyEntry(nppesSecondary, "NPPES");
+            secondaryEntry.isSecondary = true;
+            combined.add(secondaryEntry);
+        }
+        for (String c : nppesCodes) {
+            if (seen.add(c)) combined.add(new TaxonomyEntry(c, "NPPES"));
+        }
+        for (String c : master.codes) {
+            if (seen.add(c)) combined.add(new TaxonomyEntry(c, "master"));
+        }
+
+        int seq = 1;
+        for (TaxonomyEntry e : combined) e.seqNum = seq++;
+
+        String why = !primaryMatches
+                ? "staging amend -- primary mismatch (master=" + master.primaryCode + ", NPPES=" + nppesPrimary + ")"
+                : "staging amend -- NPPES has codes not in master";
+        return Decision.stage(why, combined);
     }
 
     // ============================================================
@@ -538,7 +602,7 @@ public class PractitionerTaxonomyRepair {
     // POJOs
     // ============================================================
     /** Snapshot of one practitioner's taxonomies in cpe_master, used for the diff check. */
-    private static class MasterSnapshot {
+    static class MasterSnapshot {
         static final MasterSnapshot EMPTY = new MasterSnapshot(new LinkedHashSet<>(), null);
         final Set<String> codes;          // all distinct taxonomy_code values across all rows for this NPI
         final String primaryCode;          // the code with is_primary=1 (first encountered if more than one)
@@ -558,7 +622,20 @@ public class PractitionerTaxonomyRepair {
         }
     }
 
-    private static class TaxonomyEntry {
+    /** Result of decide(): MATCH (no amend) or STAGE (amend with merged taxonomy list). */
+    static class Decision {
+        enum Kind { MATCH, STAGE }
+        final Kind kind;
+        final String reason;
+        final List<TaxonomyEntry> staged;  // populated only for STAGE; null for MATCH
+        private Decision(Kind k, String r, List<TaxonomyEntry> s) {
+            this.kind = k; this.reason = r; this.staged = s;
+        }
+        static Decision match(String reason) { return new Decision(Kind.MATCH, reason, null); }
+        static Decision stage(String reason, List<TaxonomyEntry> staged) { return new Decision(Kind.STAGE, reason, staged); }
+    }
+
+    static class TaxonomyEntry {
         final String taxonomyCode;
         final String origin;       // "claims" or "NPPES" -- audit only, not stored
         int seqNum;

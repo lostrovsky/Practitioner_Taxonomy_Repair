@@ -92,11 +92,13 @@ $REPAIR_JAR_NAME = $jarCandidates[0].Name
 
 $RUN_REPAIR_SRC  = Join-Path $INSTALL_DIR "run_repair.ps1"
 $DDL_SRC         = Join-Path $INSTALL_DIR "sql\create_cpe_repair_objects.sql"
+$DROP_SRC        = Join-Path $INSTALL_DIR "sql\drop_cpe_repair_objects.sql"
 $CALL_SRC        = Join-Path $INSTALL_DIR "calls\practitioner_taxonomy_repair"
 
 $missingFiles = @()
 if (-not (Test-Path $RUN_REPAIR_SRC)) { $missingFiles += "run_repair.ps1" }
 if (-not (Test-Path $DDL_SRC))        { $missingFiles += "sql\create_cpe_repair_objects.sql" }
+if (-not (Test-Path $DROP_SRC))       { $missingFiles += "sql\drop_cpe_repair_objects.sql" }
 if (-not (Test-Path $CALL_SRC))       { $missingFiles += "calls\practitioner_taxonomy_repair\" }
 if ($missingFiles.Count -gt 0) {
     Write-Error "Missing files in install package: $($missingFiles -join ', ')"
@@ -178,6 +180,7 @@ Write-Host "  $REPAIR_DIR\sql created"
 Write-Host "Deploying components..." -ForegroundColor Cyan
 Copy-Item $REPAIR_JAR_SRC  "$REPAIR_DIR\$REPAIR_JAR_NAME"             -Force
 Copy-Item $DDL_SRC         "$REPAIR_DIR\sql\"                          -Force
+Copy-Item $DROP_SRC        "$REPAIR_DIR\sql\"                          -Force
 Copy-Item $configFile      "$REPAIR_DIR\install.config"                -Force
 Copy-Item "$INSTALL_DIR\install.ps1" "$REPAIR_DIR\install.ps1"         -Force
 if (Test-Path "$INSTALL_DIR\version.txt") {
@@ -306,6 +309,20 @@ if ($runDdl -eq "y") {
         if ($dbServer) {
             $dbUser = $config["DB_USER"]
             $env:SQLCMDPASSWORD = $config["DB_PASSWORD"]
+
+            # Optional destructive drop -- mirrors the pipeline installer's "Drop existing
+            # objects first?" prompt. Drops all cpe_repair objects + data. Safe to say y
+            # for a fresh install or to clean test artifacts before rebuilding.
+            $dropFirst = Read-Host "  Drop existing cpe_repair objects first? (DESTRUCTIVE -- erases all repair_run / practitioner_repair rows) (y/N)"
+            if ($dropFirst -eq "y") {
+                & $sqlcmd -b -S $dbServer -d $dbName -U $dbUser -i "$REPAIR_DIR\sql\drop_cpe_repair_objects.sql"
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  Existing cpe_repair objects dropped" -ForegroundColor Green
+                } else {
+                    Write-Host "  WARNING: drop script returned errors -- check output above" -ForegroundColor Yellow
+                }
+            }
+
             & $sqlcmd -b -S $dbServer -d $dbName -U $dbUser -i "$REPAIR_DIR\sql\create_cpe_repair_objects.sql"
             $env:SQLCMDPASSWORD = $null
             if ($LASTEXITCODE -eq 0) {

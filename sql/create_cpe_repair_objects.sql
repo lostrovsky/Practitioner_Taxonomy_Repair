@@ -9,35 +9,18 @@
 -- by run_id. The loader's --RUN_ID flag and ${RUN_ID} placeholder
 -- pass straight through without renaming.
 --
--- Embedded v1.x -> v1.5 migration:
--- Older installs of this project had a cpe_repair.batch table with
--- a batch_id column (and a TVF named ..._for_batch_id). Re-running
--- this DDL on such an install drops those objects first and rebuilds
--- under the new names. Existing rows in cpe_repair.* are audit
--- artifacts from prior repair runs -- they're discarded (acceptable
--- for a one-off remediation tool; no operational data lives here).
+-- Re-running this DDL on an existing v1.6.0+ install is a clean
+-- no-op (IF NOT EXISTS guards). To rebuild from scratch (e.g.
+-- after a botched install or to clean test artifacts), run
+-- drop_cpe_repair_objects.sql first.
 -- ============================================================
 
 SET QUOTED_IDENTIFIER ON;
 SET NOCOUNT ON;
 
--- 0. Schema
+-- 1. Schema
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = 'cpe_repair')
     EXEC('CREATE SCHEMA cpe_repair AUTHORIZATION dbo;');
-GO
-
--- 1. Migration: drop old v1.x objects if present (batch_id era).
-IF OBJECT_ID('cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id', 'IF') IS NOT NULL
-    DROP FUNCTION cpe_repair.fn_get_practitioner_taxonomy_repair_for_batch_id;
-GO
-
-IF OBJECT_ID('cpe_repair.batch', 'U') IS NOT NULL
-BEGIN
-    PRINT 'Migrating v1.x: dropping old cpe_repair.batch / practitioner_repair / practitioner_taxonomy';
-    IF OBJECT_ID('cpe_repair.practitioner_taxonomy', 'U') IS NOT NULL DROP TABLE cpe_repair.practitioner_taxonomy;
-    IF OBJECT_ID('cpe_repair.practitioner_repair', 'U') IS NOT NULL DROP TABLE cpe_repair.practitioner_repair;
-    DROP TABLE cpe_repair.batch;
-END
 GO
 
 -- 2. Run table -- one row per repair invocation
@@ -46,10 +29,11 @@ BEGIN
     CREATE TABLE cpe_repair.repair_run (
         run_id         BIGINT        IDENTITY(1,1) NOT NULL,
         description    NVARCHAR(200) NULL,
-        status         NVARCHAR(20)  NOT NULL DEFAULT 'pending',  -- pending | loaded | partial | failed
+        status         NVARCHAR(20)  NOT NULL DEFAULT 'pending',  -- pending | completed | partial | failed
         created_time   DATETIME2     NOT NULL DEFAULT GETDATE(),
         completed_time DATETIME2     NULL,
-        CONSTRAINT pk_repair_run PRIMARY KEY (run_id)
+        CONSTRAINT pk_repair_run PRIMARY KEY (run_id),
+        CONSTRAINT ck_repair_run_status CHECK (status IN ('pending','completed','partial','failed'))
     );
 END
 GO
@@ -69,7 +53,8 @@ BEGIN
         loaded_time         DATETIME2     NULL,
         created_time        DATETIME2     NOT NULL DEFAULT GETDATE(),
         CONSTRAINT pk_repair_practitioner PRIMARY KEY (entity_id),
-        CONSTRAINT uq_repair_practitioner_run_npi UNIQUE (run_id, npi)
+        CONSTRAINT uq_repair_practitioner_run_npi UNIQUE (run_id, npi),
+        CONSTRAINT ck_repair_practitioner_status CHECK (status IN ('pending','loaded','failed','skipped'))
     );
     CREATE INDEX ix_repair_practitioner_run ON cpe_repair.practitioner_repair(run_id);
 
@@ -79,18 +64,23 @@ BEGIN
 END
 GO
 
--- 4. Taxonomies for each practitioner_repair entity
+-- 4. Taxonomies for each practitioner_repair entity.
+--    CHECK constraint enforces is_primary XOR is_secondary -- the Java tool
+--    never sets both, but the column-level guard catches future-caller mistakes
+--    and SQL-injection attempts via dynamic INSERTs.
 IF OBJECT_ID('cpe_repair.practitioner_taxonomy', 'U') IS NULL
 BEGIN
     CREATE TABLE cpe_repair.practitioner_taxonomy (
         entity_id      BIGINT        NOT NULL,
         taxonomy_code  NVARCHAR(20)  NOT NULL,
-        taxonomy_name  NVARCHAR(255) NULL,
+        taxonomy_name  NVARCHAR(255) NOT NULL,
         seq_num        INT           NOT NULL,
         is_primary     BIT           NOT NULL,
         is_secondary   BIT           NOT NULL,
         created_time   DATETIME2     NOT NULL DEFAULT GETDATE(),
-        CONSTRAINT pk_repair_taxonomy PRIMARY KEY (entity_id, taxonomy_code)
+        CONSTRAINT pk_repair_taxonomy PRIMARY KEY (entity_id, taxonomy_code),
+        CONSTRAINT ck_repair_taxonomy_primary_xor_secondary
+            CHECK (NOT (is_primary = 1 AND is_secondary = 1))
     );
 
     ALTER TABLE cpe_repair.practitioner_taxonomy WITH NOCHECK
@@ -105,6 +95,12 @@ GO
 --    The loader's existing template can render it without changes.
 --    Filters status NOT IN ('loaded','skipped') so resume is free and
 --    skipped rows are never sent to HRP.
+--
+--    The Java jar refuses to stage a practitioner whose NPPES primary code
+--    didn't resolve in the taxonomy lookup table (PROVIDER_TAXONOMY by
+--    default), so the previous "any name non-null" defensive filter at the
+--    outer SELECT level is no longer needed -- if practitioner_repair has a
+--    pending row, its taxonomies have non-null names by construction.
 CREATE OR ALTER FUNCTION cpe_repair.fn_get_practitioner_taxonomy_repair_for_run_id(@run_id BIGINT)
 RETURNS TABLE
 AS
@@ -146,10 +142,6 @@ RETURN
           AND prt_other.is_secondary = 0
     WHERE pr.run_id = @run_id
       AND pr.status NOT IN ('loaded', 'skipped')
-      -- Exclude rows with no taxonomies at all (defensive; shouldn't happen)
-      AND (prt_primary.taxonomy_name   IS NOT NULL
-        OR prt_secondary.taxonomy_name IS NOT NULL
-        OR prt_other.taxonomy_name     IS NOT NULL)
 );
 GO
 
@@ -167,6 +159,42 @@ BEGIN
            loaded_time   = CASE WHEN @success = 1 THEN GETDATE() ELSE loaded_time END,
            error_message = @error_message
      WHERE entity_id = @entity_id;
+END
+GO
+
+-- 7. Stored proc to finalize a repair_run after the loader completes.
+--    Sets status based on aggregate practitioner_repair statuses:
+--      completed -- every non-skipped row is 'loaded'
+--      partial   -- at least one 'loaded' AND at least one 'failed'
+--      failed    -- no 'loaded' rows AND at least one 'failed' row
+--      pending   -- no movement (loader didn't run, or all rows still pending)
+--    Called by run_repair.ps1 after the loader's exit; safe to re-run.
+CREATE OR ALTER PROCEDURE cpe_repair.sp_finalize_repair_run
+    @run_id BIGINT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @loaded INT, @failed INT, @pending INT;
+    SELECT
+        @loaded  = SUM(CASE WHEN status = 'loaded'  THEN 1 ELSE 0 END),
+        @failed  = SUM(CASE WHEN status = 'failed'  THEN 1 ELSE 0 END),
+        @pending = SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)
+    FROM cpe_repair.practitioner_repair
+    WHERE run_id = @run_id;
+
+    DECLARE @new_status NVARCHAR(20);
+    SET @new_status =
+        CASE
+            WHEN @loaded > 0 AND @failed = 0 AND @pending = 0 THEN 'completed'
+            WHEN @loaded > 0 AND (@failed > 0 OR @pending > 0) THEN 'partial'
+            WHEN @loaded = 0 AND @failed > 0                   THEN 'failed'
+            ELSE 'pending'   -- no movement (skip-only run, or loader didn't run)
+        END;
+
+    UPDATE cpe_repair.repair_run
+       SET status         = @new_status,
+           completed_time = CASE WHEN @new_status IN ('completed','partial','failed') THEN GETDATE() ELSE completed_time END
+     WHERE run_id = @run_id;
 END
 GO
 
