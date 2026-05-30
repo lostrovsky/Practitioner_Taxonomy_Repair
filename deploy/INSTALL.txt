@@ -34,7 +34,7 @@ Extract the release zip to any temporary directory -- NOT on top of
 your existing pipeline install. The installer will create the actual
 install folder. Example:
 
-    C:\temp\ptr_v1.6.0\
+    C:\temp\ptr_v1.6.1\
 
 Resulting layout:
 
@@ -86,7 +86,7 @@ STEP 3: RUN install.ps1
 ============================================================
 From the extracted temp directory:
 
-    cd C:\temp\ptr_v1.6.0
+    cd C:\temp\ptr_v1.6.1
     .\install.ps1
 
 You'll be prompted for:

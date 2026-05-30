@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.6.0](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- mirrors the daily pipeline's install pattern (install.config + install.ps1) and adds a `run_repair.ps1` orchestrator that handles both the stage step and the loader call.
+**Latest release:** [v1.6.1](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- patch: `drop_cpe_repair_objects.sql` now also removes the legacy pre-v1.5 objects (`cpe_repair.batch`, `fn_..._for_batch_id`), so a database last installed at v1.4.0 or earlier drops + rebuilds cleanly. (v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests; v1.4.0 mirrored the daily pipeline's install pattern with `install.config` + `install.ps1` + a `run_repair.ps1` orchestrator.)
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.0\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.1\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.6.0
+   cd C:\temp\ptr_v1.6.1
    .\install.ps1
    ```
 
