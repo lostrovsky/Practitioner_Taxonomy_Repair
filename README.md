@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.6.1](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- patch: `drop_cpe_repair_objects.sql` now also removes the legacy pre-v1.5 objects (`cpe_repair.batch`, `fn_..._for_batch_id`), so a database last installed at v1.4.0 or earlier drops + rebuilds cleanly. (v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests; v1.4.0 mirrored the daily pipeline's install pattern with `install.config` + `install.ps1` + a `run_repair.ps1` orchestrator.)
+**Latest release:** [v1.6.2](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- safety + auditability for `run_repair.ps1`: **dry-run is now the default** (real runs need `-Execute`, resume included), and every transcript records the invocation plus explicit `DB writes:` / `HRP calls:` lines. (v1.6.1 fixed `drop_cpe_repair_objects.sql` to also remove the legacy pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests; v1.4.0 mirrored the daily pipeline's install pattern with `install.config` + `install.ps1` + a `run_repair.ps1` orchestrator.)
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.1\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.2\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.6.1
+   cd C:\temp\ptr_v1.6.2
    .\install.ps1
    ```
 
@@ -47,23 +47,32 @@ See bundled `INSTALL.txt` for the full reference.
 
 ### Run
 
+**Dry-run is the default (since v1.6.2).** A bare `.\run_repair.ps1` writes nothing and never calls the loader. Real runs require an explicit `-Execute`.
+
 ```powershell
 cd <base>\Practitioner_Taxonomy_Repair
 
-# Dry-run a pilot (no DB writes, no loader call)
-.\run_repair.ps1 -NpiFile pilot.txt -DryRun
-
-# Stage + load. Loader honors LOG_ONLY from env.properties (verify SOAP first).
+# Dry-run a pilot (the default -- no DB writes, no loader call)
 .\run_repair.ps1 -NpiFile pilot.txt
 
-# Full batch (auto-derive NPI list; honors db.npi_query if set in install.config)
-.\run_repair.ps1 -Description "Production repair run"
+# Stage + load. Loader honors LOG_ONLY from env.properties (verify SOAP first).
+.\run_repair.ps1 -NpiFile pilot.txt -Execute
 
-# Resume a previous batch (re-invoke loader only; TVF skips already-loaded/skipped rows)
-.\run_repair.ps1 -RunId 7
+# Full batch (auto-derive NPI list; honors db.npi_query if set in install.config)
+.\run_repair.ps1 -Description "Production repair run" -Execute
+
+# Resume a previous run (re-invoke loader only; TVF skips already-loaded/skipped rows)
+.\run_repair.ps1 -RunId 7 -Execute
 ```
 
-`run_repair.ps1` calls the repair jar first, captures the `RUN_ID` from its stdout, then invokes `generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<n> --env-file=...\env.properties`. End-of-run summary prints per-status row counts from `cpe_repair.practitioner_repair`. Concurrency-locked; transcript log written to `repair_<timestamp>.log` next to the script.
+`-Execute` and `LOG_ONLY` are independent and control different stages:
+
+| | `-Execute` omitted (default) | `-Execute` + `LOG_ONLY=true` | `-Execute` + `LOG_ONLY=false` |
+|---|---|---|---|
+| `cpe_repair` rows | none | staged, left `pending` | staged, marked `loaded` |
+| SOAP to HRP | none | logged only | **sent live** |
+
+`run_repair.ps1` calls the repair jar first, captures the `RUN_ID` from its stdout, then invokes `generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<n> --env-file=...\env.properties`. End-of-run summary prints the invocation, an explicit `DB writes:` / `HRP calls:` statement, and per-status row counts from `cpe_repair.practitioner_repair`. Concurrency-locked; transcript log written to `repair_<timestamp>.log` next to the script.
 
 ### Restricting to specific NPIs
 
@@ -73,7 +82,7 @@ Two mechanisms:
 ```powershell
 echo 1003008574 > pilot.txt
 echo 1234567890 >> pilot.txt
-.\run_repair.ps1 -NpiFile pilot.txt -DryRun
+.\run_repair.ps1 -NpiFile pilot.txt      # dry-run by default
 ```
 
 **Custom SQL** -- set `NPI_QUERY` in `install.config` (re-run `install.ps1` to regenerate the properties file). The jar uses it verbatim when `--npi-file` is not passed; useful for a `cpe_load.load_run` bug-window filter. Example:

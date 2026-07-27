@@ -7,18 +7,60 @@
 # DB check, two phases, summary).
 # ============================================================
 
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidDefaultValueSwitchParameter', '',
+    Justification = 'Deliberate. This tool writes remediation rows to cpe_repair and pushes SOAP amends to HRP, so the safe state must be the default one: a bare invocation stages nothing. -Execute is the explicit opt-in for a real run.')]
 param(
     [string]$LogOutput = "both",
     [string]$NpiFile = "",
     [string]$Description = "",
-    [switch]$DryRun,
+    [switch]$DryRun = $true,     # DEFAULTS TO TRUE. A bare `.\run_repair.ps1` stages NOTHING.
+                                  # Pass -Execute (or -DryRun:$false) to perform a real run.
+    [switch]$Execute,            # Opt in to a real run: stages cpe_repair rows and invokes the loader.
     [string]$RunId = "",         # Resume mode: skip the stage phase, re-invoke the loader against an existing run.
                                   # TVF filters status NOT IN ('loaded','skipped') so previously-loaded rows complete instantly.
     [switch]$LogOnlyOverride     # Override env.properties LOG_ONLY=false for one run. The loader's --LOG_ONLY=true wins regardless.
 )
 
+# ============================================================
+# Dry-run is the DEFAULT. Staging real cpe_repair rows requires an explicit
+# opt-in, so an accidental bare invocation can never write to the database.
+#
+# -Execute is the readable inverse; -DryRun:$false is the literal one. Passing
+# both -Execute and an explicit -DryRun is contradictory, so fail loudly rather
+# than silently picking one.
+# ============================================================
+$dryRunExplicit = $PSBoundParameters.ContainsKey('DryRun')
+if ($Execute -and $dryRunExplicit -and $DryRun) {
+    Write-Error "Contradictory parameters: -Execute requests a real run but -DryRun was also passed. Pass exactly one."
+    exit 1
+}
+if ($Execute) { $DryRun = [switch]$false }
+
 # Resume mode short-circuits the stage phase.
 $RESUME_MODE = ($RunId -ne "")
+
+# ============================================================
+# Invocation record -- captured here at script scope, printed after the
+# transcript opens further down.
+#
+# Start-Transcript runs INSIDE this script, so by the time it opens, the
+# operator's command line has already scrolled past and is never captured.
+# The transcript header's "Host Application" line reflects whatever launched
+# the shell (often a stale ISE session), not this invocation. Without the
+# echo below, a completed log gives no way to tell a -DryRun from a real
+# staging run except by inferring it from downstream messages.
+#
+# Reconstructed from $PSBoundParameters rather than $MyInvocation.Line:
+# .Line returns the caller's ENTIRE command line, so an operator running
+# something like `$env:SQLCMDPASSWORD='...'; .\run_repair.ps1` would write
+# that secret straight into the transcript. $PSBoundParameters contains only
+# this script's own parameters, and also captures splatted/programmatic calls.
+# ============================================================
+$INVOCATION_PARAMS = ($PSBoundParameters.GetEnumerator() | Sort-Object Key | ForEach-Object {
+    if ($_.Value -is [switch]) { "-$($_.Key)" } else { "-$($_.Key) '$($_.Value)'" }
+}) -join ' '
+$INVOCATION_LINE = ".\$($MyInvocation.MyCommand.Name) $INVOCATION_PARAMS".TrimEnd()
+if ($PSBoundParameters.Count -eq 0) { $INVOCATION_LINE += "   (no parameters -- all defaulted)" }
 
 # ============================================================
 # Directory configuration (all paths relative to script location)
@@ -67,6 +109,7 @@ function Get-RunSummaryLines {
     $elapsed = if ($REPAIR_START) { [int]((Get-Date) - $REPAIR_START).TotalSeconds } else { 0 }
     $lines = @(
         "Status:       $Status",
+        "Invocation:   $INVOCATION_LINE",
         "Run ID:       $(if ($RUN_ID) { $RUN_ID } else { '(not assigned)' })"
     )
     if ($RESUME_MODE) {
@@ -75,6 +118,24 @@ function Get-RunSummaryLines {
     if ($DryRun) {
         $lines += "Mode:         dry-run (no DB writes; no loader call)"
     }
+
+    # State the write footprint explicitly. -DryRun and LOG_ONLY are independent
+    # flags that suppress different things, and reading a finished log should
+    # never require inferring which one was in effect.
+    $lines += "DB writes:    $(
+        if ($DryRun)          { 'NONE -- dry-run skipped all INSERTs' }
+        elseif ($RESUME_MODE) { 'cpe_repair status updates only (stage phase skipped)' }
+        elseif (-not $RUN_ID) { 'NONE -- run ended before the staging step completed' }
+        else                  { 'cpe_repair rows staged (repair_run + practitioner_repair + practitioner_taxonomy)' }
+    )"
+    $lines += "HRP calls:    $(
+        if ($DryRun)                 { 'NONE -- dry-run; loader was not invoked' }
+        elseif (-not $RUN_ID)        { 'NONE -- run ended before the loader was invoked' }
+        elseif ($null -eq $LOG_ONLY) { '(undetermined -- LOG_ONLY was never parsed)' }
+        elseif ($LOG_ONLY)           { 'NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run (rows stay pending)' }
+        else                         { 'LIVE -- SOAP amends sent to HRP' }
+    )"
+
     $lines += @(
         "Elapsed:      ${elapsed}s",
         "Log file:     $REPAIR_LOG",
@@ -173,6 +234,7 @@ try { Start-Transcript -Path $REPAIR_LOG -Force | Out-Null } catch {}
 # ============================================================
 Write-Step "STEP 1: Validating prerequisites"
 Write-Host "  Repair version: $VERSION"
+Write-Host "  Invocation:     $INVOCATION_LINE"
 
 $errors = @()
 
@@ -267,7 +329,19 @@ try {
 $REPAIR_START = Get-Date
 $RUN_ID = $null
 
-if ($LOG_ONLY) {
+if ($DryRun) {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Yellow
+    Write-Host "  DRY-RUN MODE ACTIVE$(if (-not $dryRunExplicit) { '  (THE DEFAULT)' })" -ForegroundColor Yellow
+    Write-Host "  - NOTHING will be written to cpe_repair" -ForegroundColor Yellow
+    Write-Host "  - The loader will NOT be invoked; no run_id is assigned" -ForegroundColor Yellow
+    Write-Host "  - The jar still calls NPPES and diffs against cpe_master," -ForegroundColor Yellow
+    Write-Host "    so the staged/skipped counts below are accurate" -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "  To perform a REAL run:  .\run_repair.ps1 -Execute $(if ($NpiFile) { "-NpiFile $NpiFile" })" -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Yellow
+}
+elseif ($LOG_ONLY) {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Yellow
     Write-Host "  LOG-ONLY MODE ACTIVE" -ForegroundColor Yellow
@@ -275,6 +349,14 @@ if ($LOG_ONLY) {
     Write-Host "  - HRP receives no SOAP calls; envelopes are logged instead" -ForegroundColor Yellow
     Write-Host "  - cpe_repair rows still get inserted by the stage step" -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Yellow
+}
+else {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host "  REAL RUN -- LOG_ONLY=false" -ForegroundColor Red
+    Write-Host "  - cpe_repair rows will be staged" -ForegroundColor Red
+    Write-Host "  - LIVE SOAP amends will be sent to HRP" -ForegroundColor Red
+    Write-Host "============================================================" -ForegroundColor Red
 }
 
 # ============================================================
@@ -347,6 +429,30 @@ if (-not $RESUME_MODE) {
         $env:SQLCMDPASSWORD = $null
         Remove-LockAndExit "Could not verify run $RUN_ID exists: $_"
     }
+}
+
+# ============================================================
+# Dry-run stop for RESUME mode.
+#
+# The non-resume dry-run exit lives inside the STEP 2 block above, which resume
+# skips entirely. Without this guard, `.\run_repair.ps1 -RunId 7` would inherit
+# the dry-run default and then fall straight through to a LIVE loader call --
+# the exact opposite of what the operator asked for. Resume re-sends real SOAP
+# amends, so it requires the same explicit opt-in as any other real run.
+# ============================================================
+if ($RESUME_MODE -and $DryRun) {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Yellow
+    Write-Host "  DRY-RUN: stopping before the loader" -ForegroundColor Yellow
+    Write-Host "  Run $RUN_ID exists and is resumable, but resuming re-sends" -ForegroundColor Yellow
+    Write-Host "  real SOAP amends for its pending/failed rows." -ForegroundColor Yellow
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "  To actually resume:  .\run_repair.ps1 -RunId $RUN_ID -Execute" -ForegroundColor Yellow
+    Write-Host "============================================================" -ForegroundColor Yellow
+    Write-RunSummary -Status "DRY-RUN"
+    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 0
 }
 
 # ============================================================

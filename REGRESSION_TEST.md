@@ -99,7 +99,7 @@ Write them to `C:\Tools\PTR_smoke\Practitioner_Taxonomy_Repair\pilot.txt`
 
 ```powershell
 cd C:\Tools\PTR_smoke\Practitioner_Taxonomy_Repair
-.\run_repair.ps1 -NpiFile pilot.txt -Description "regression: skip path"
+.\run_repair.ps1 -NpiFile pilot.txt -Description "regression: skip path" -Execute
 ```
 
 **Expected:**
@@ -143,7 +143,7 @@ Write a one-line pilot file and run:
 
 ```powershell
 "1003008574" | Set-Content inject_test.txt
-.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: inject"
+.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: inject" -Execute
 ```
 
 **Expected:**
@@ -177,7 +177,7 @@ FROM cpe_master.practitioner_taxonomy WHERE npi='1003008574' ORDER BY taxonomy_c
 
 ```powershell
 # Re-run repair against the same NPI; should now skip
-.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: restore verify"
+.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: restore verify" -Execute
 # Expected: 1 skipped, 0 staged
 ```
 
@@ -191,7 +191,7 @@ that same batch:
 
 ```powershell
 # Replace <n> with the run_id from Step 5
-.\run_repair.ps1 -RunId <n>
+.\run_repair.ps1 -RunId <n> -Execute
 ```
 
 **Expected:** STEP 2 skipped (resume banner printed); STEP 3 runs the loader

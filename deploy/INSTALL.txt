@@ -122,32 +122,59 @@ repair folder, not the extracted temp.
 
     cd <base>\Practitioner_Taxonomy_Repair
 
-Typical first run (LOG_ONLY mode -- inspect SOAP envelopes; no HRP calls):
+*** DRY-RUN IS THE DEFAULT (since v1.6.2). ***
+A bare .\run_repair.ps1 writes NOTHING to the database and never calls the
+loader. Every real run -- staging or resume -- requires an explicit -Execute
+(or the literal equivalent -DryRun:$false).
 
-    .\run_repair.ps1 -NpiFile pilot.txt -DryRun
-        -> jar stages nothing, logs what it would stage. No loader call.
+There are two INDEPENDENT safety flags. Know which one you are using:
+
+    -Execute / -DryRun    controls whether cpe_repair rows are STAGED
+                          and whether the loader runs at all.
+    LOG_ONLY              (env.properties) controls whether the loader
+                          SENDS SOAP to HRP. With LOG_ONLY=true the rows
+                          are still staged; envelopes are only logged and
+                          the post-call SQL is dry-run, so rows stay
+                          'pending'.
+
+Every run's log now states both explicitly, at STEP 1 and in the RUN SUMMARY:
+
+    Invocation:   .\run_repair.ps1 -NpiFile pilot.txt -Execute
+    DB writes:    cpe_repair rows staged (repair_run + practitioner_repair + ...)
+    HRP calls:    NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run
+
+Typical first run (dry-run -- confirms NPPES reachability and the
+staged/skipped counts without touching the database):
 
     .\run_repair.ps1 -NpiFile pilot.txt
-        -> jar stages a run. Loader runs (LOG_ONLY honors env.properties).
-           Captures RUN_ID, then invokes the loader. Watch the SOAP in the
-           log; verify it looks right.
+        -> jar stages nothing, logs what it would stage. No loader call.
+           No run_id is assigned.
+
+Then stage for real, with LOG_ONLY=true in env.properties so HRP is not
+called (inspect the SOAP envelopes in the log):
+
+    .\run_repair.ps1 -NpiFile pilot.txt -Execute
+        -> jar stages a run and captures RUN_ID, then invokes the loader.
+           Watch the SOAP in the log; verify it looks right.
 
 When ready for real:
 
     # Set LOG_ONLY=false in env.properties (or pass -LogOnlyOverride for one run)
-    .\run_repair.ps1 -NpiFile pilot.txt
+    .\run_repair.ps1 -NpiFile pilot.txt -Execute
         -> Real amends pushed to HRP. Spot-check the affected practitioners
            in HRP.
 
 For the full population (no --npi-file -> auto-derive query, or NPI_QUERY
 override if set in install.config):
 
-    .\run_repair.ps1 -Description "Production repair run"
+    .\run_repair.ps1 -Description "Production repair run" -Execute
 
 Resume mode (re-run only the loader against an existing run_id; useful
-after a mid-run loader failure):
+after a mid-run loader failure). Resume re-sends real SOAP amends, so it
+needs -Execute too -- without it the script verifies the run exists and
+then stops before the loader:
 
-    .\run_repair.ps1 -RunId 7
+    .\run_repair.ps1 -RunId 7 -Execute
 
 ============================================================
 STEP 5: VERIFY
