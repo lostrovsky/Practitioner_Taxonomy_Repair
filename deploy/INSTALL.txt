@@ -34,7 +34,7 @@ Extract the release zip to any temporary directory -- NOT on top of
 your existing pipeline install. The installer will create the actual
 install folder. Example:
 
-    C:\temp\ptr_v1.6.3\
+    C:\temp\ptr_v1.6.4\
 
 Resulting layout:
 
@@ -89,7 +89,7 @@ STEP 3: RUN install.ps1
 ============================================================
 From the extracted temp directory:
 
-    cd C:\temp\ptr_v1.6.3
+    cd C:\temp\ptr_v1.6.4
     .\install.ps1
 
 You'll be prompted for:
@@ -166,6 +166,17 @@ list, or $RunId to resume an existing run):
       env.properties   : LOG_ONLY=false
 
       -> Live SOAP amends. Rows flip to 'loaded'.
+
+*** DELIVERY IS VERIFIED FROM THE DATABASE. ***
+The loader exits 0 even when every SOAP call fails -- a thrown call is logged
+and swallowed, and its post-call SQL never runs, so rows stay 'pending' with no
+error recorded. After a LIVE run, run_repair.ps1 re-queries
+cpe_repair.practitioner_repair; any row still pending/failed gives:
+
+    Status:  FAILED -- N row(s) undelivered      (exit 1)
+
+with a retry hint. Retry with the same $RunId once the cause is fixed; the TVF
+skips rows that already loaded.
 
 *** HRP CALLS REQUIRE BOTH GATES OPEN. ***
 $HrpCallsLogMode = $false is NOT sufficient on its own -- env.properties must

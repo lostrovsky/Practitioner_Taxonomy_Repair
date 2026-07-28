@@ -166,10 +166,12 @@ function Get-RunSummaryLines {
     # State the write footprint explicitly. -DryRun and LOG_ONLY are independent
     # flags that suppress different things, and reading a finished log should
     # never require inferring which one was in effect.
+    # -not $RUN_ID is checked BEFORE $RESUME_MODE: a resume that aborts during validation
+    # never reaches the loader, so claiming "status updates only" would overstate what happened.
     $lines += "DB writes:    $(
         if ($DryRun)          { 'NONE -- dry-run skipped all INSERTs' }
+        elseif (-not $RUN_ID) { 'NONE -- run ended before any rows were written' }
         elseif ($RESUME_MODE) { 'cpe_repair status updates only (stage phase skipped)' }
-        elseif (-not $RUN_ID) { 'NONE -- run ended before the staging step completed' }
         else                  { 'cpe_repair rows staged (repair_run + practitioner_repair + practitioner_taxonomy)' }
     )"
     $lines += "HRP calls:    $(
@@ -545,7 +547,7 @@ Write-Step "STEP 3: Loading practitioner_taxonomy_repair (run_id=$RUN_ID)"
 
 # Build loader args. --LOG_ONLY=true is honored when env says LOG_ONLY=true OR -LogOnlyOverride passed.
 $loaderArgs = @("-jar", $WS_JAR, $CALL_DIR, "--RUN_ID=$RUN_ID", "--log-output=$LogOutput", "--env-file=$ENV_FILE")
-if ($LogOnlyOverride) { $loaderArgs += "--LOG_ONLY=true" }
+if ($LOG_ONLY) { $loaderArgs += "--LOG_ONLY=true" }
 
 & java @loaderArgs 2>&1 | Out-Host
 $loaderExit = $LASTEXITCODE
@@ -588,6 +590,58 @@ if ($LOG_ONLY) {
     Write-Host "  - cpe_repair rows for this run may still show pending depending on the call's post-call SQL" -ForegroundColor Yellow
     Write-Host "  - To re-run for real: set LOG_ONLY=false in env.properties, then:" -ForegroundColor Yellow
     Write-Host "      .\run_repair.ps1 -RunId $RUN_ID" -ForegroundColor Yellow
+}
+
+# ============================================================
+# Verify the live run actually delivered.
+#
+# The loader exits 0 even when every record failed: if the web-service call
+# throws (endpoint down, DNS, TLS, connection refused), Generic_HRP_WS_Call
+# logs SEVERE and swallows the exception, and because its post-call SQL runs
+# INSIDE that same try block, no error is recorded either. Rows are left
+# 'pending' with a NULL error_message and the process returns 0.
+#
+# Without this check a total HRP outage reports "Status: SUCCESS". We cannot
+# fix the loader (this project does not modify sibling projects), so verify
+# the outcome from the database instead: after a LIVE run, every row the TVF
+# would have sent should have moved off 'pending'.
+#
+# Only meaningful for a live run -- in log-only mode rows are SUPPOSED to
+# stay pending, since the post-call SQL is deliberately dry-run.
+# ============================================================
+$UNDELIVERED = 0
+if (-not $LOG_ONLY) {
+    try {
+        $env:SQLCMDPASSWORD = $DB_PASSWORD
+        $raw = & $SQLCMD -b -S $DB_SERVER -d $DB_NAME -U $DB_USER -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM cpe_repair.practitioner_repair WHERE run_id = $RUN_ID AND status IN ('pending','failed')" 2>$null
+        $env:SQLCMDPASSWORD = $null
+        if ($LASTEXITCODE -eq 0 -and $raw) {
+            $parsed = 0
+            if ([int]::TryParse((($raw | Select-Object -First 1) -as [string]).Trim(), [ref]$parsed)) { $UNDELIVERED = $parsed }
+        }
+    } catch {
+        $env:SQLCMDPASSWORD = $null
+        Write-Host "  WARNING: could not verify delivery for run $RUN_ID : $_" -ForegroundColor Yellow
+    }
+}
+
+if ($UNDELIVERED -gt 0) {
+    Write-Host ""
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host "  LOADER REPORTED SUCCESS BUT $UNDELIVERED ROW(S) WERE NOT DELIVERED" -ForegroundColor Red
+    Write-Host "============================================================" -ForegroundColor Red
+    Write-Host "  Run $RUN_ID still has $UNDELIVERED row(s) in pending/failed after a LIVE run." -ForegroundColor Red
+    Write-Host "  The loader exits 0 even when every SOAP call fails (endpoint down," -ForegroundColor Red
+    Write-Host "  refused, TLS, DNS), so treat its exit code as unreliable here." -ForegroundColor Red
+    Write-Host "  Check the STEP 3 output above for 'error:' / 'failed' lines." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  To retry after fixing the cause:" -ForegroundColor Yellow
+    Write-Host "    .\run_repair.ps1 -RunId $RUN_ID -Execute" -ForegroundColor Yellow
+    Write-Host "  Already-loaded rows are skipped by the TVF, so only these retry." -ForegroundColor Yellow
+    Write-RunSummary -Status "FAILED -- $UNDELIVERED row(s) undelivered"
+    Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
 }
 
 Write-RunSummary -Status "SUCCESS"

@@ -192,6 +192,47 @@ FROM cpe_master.practitioner_taxonomy WHERE npi='1003008574' ORDER BY taxonomy_c
 If both the row-state query AND the verify-rerun confirm restoration, the
 inject is clean.
 
+## Step 5b: Safety-gate matrix (added v1.6.4)
+
+Exercise all four combinations of the two HRP gates. `WS_BASE_URL` should point
+at a dead port (e.g. `http://127.0.0.1:9`) so a live attempt is observable as
+`Connection refused` without contacting a real endpoint.
+
+| `$HrpCallsLogMode` | `env.properties` | Expected |
+|---|---|---|
+| `$true` | `LOG_ONLY=true` | `Logging XML instead of calling`; no connection attempt |
+| `$true` | `LOG_ONLY=false` | **same** -- script tightened it; loader must receive `--LOG_ONLY=true` |
+| `$false` | `LOG_ONLY=false` | `Connection refused`; live attempt made |
+| `$false` | `LOG_ONLY=true` | **ABORT** during STEP 1, exit 1, lock released |
+
+Row 2 is the regression that shipped broken in v1.6.3: the banner said log-only
+while the loader was never given the flag and sent live traffic. Confirm the
+loader logs `log_only=true` and that no `Connection refused` appears.
+
+## Step 5c: Undelivered detection (added v1.6.4)
+
+With both gates open against the dead port, the loader fails every record but
+still exits 0. Expected:
+
+```
+LOADER REPORTED SUCCESS BUT 1 ROW(S) WERE NOT DELIVERED
+Status:       FAILED -- 1 row(s) undelivered
+```
+
+exit 1, and the row remains `pending` for retry.
+
+## Step 5d: Duplicate NPI handling (added v1.6.4)
+
+Write the same NPI twice into a file and run a stage. Expected:
+
+```
+INFO: NPI file contained 1 duplicate line(s); using 1 distinct NPIs.
+```
+
+Run succeeds. Before v1.6.4 this violated `uq_repair_practitioner_run_npi` and
+rolled back the entire staging transaction after every NPPES lookup had already
+been paid for.
+
 ## Step 6: (Optional) Resume mode
 
 After Step 5's inject run produced a `pending` row, re-run the loader against

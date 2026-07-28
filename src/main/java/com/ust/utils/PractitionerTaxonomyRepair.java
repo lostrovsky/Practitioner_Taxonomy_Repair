@@ -409,21 +409,39 @@ public class PractitionerTaxonomyRepair {
         // Trim very long custom queries to keep the log readable.
         logger.info("NPI query: " + (sql.length() > 500 ? sql.substring(0, 500) + " ... [truncated]" : sql));
         Connection conn = dbManager.getConnection();
-        List<String> npis = new ArrayList<>();
+        // Deduped for the same reason as readNpiFile: the built-in query is DISTINCT, but an
+        // operator-supplied db.npi_query need not be, and a repeat would blow up persistRun
+        // at the end on uq_repair_practitioner_run_npi.
+        Set<String> npis = new LinkedHashSet<>();
+        int duplicates = 0;
         try (Statement st = conn.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) npis.add(rs.getString(1));
+            while (rs.next()) if (!npis.add(rs.getString(1))) duplicates++;
         }
-        return npis;
+        if (duplicates > 0) {
+            logger.info("NPI query returned " + duplicates + " duplicate row(s); using "
+                    + npis.size() + " distinct NPIs.");
+        }
+        return new ArrayList<>(npis);
     }
 
     private static List<String> readNpiFile(String path) throws Exception {
-        List<String> npis = new ArrayList<>();
+        // LinkedHashSet: dedup while preserving file order. A repeated NPI would otherwise
+        // be staged twice and violate uq_repair_practitioner_run_npi at the very END of
+        // persistRun -- rolling back the entire transaction after every NPPES lookup has
+        // already been paid for. Operator-maintained pilot files pick up duplicates easily
+        // (a non-DISTINCT query, an appended list), so absorb it rather than fail late.
+        Set<String> npis = new LinkedHashSet<>();
+        int duplicates = 0;
         for (String line : java.nio.file.Files.readAllLines(Paths.get(path))) {
             String t = line.trim();
             if (t.isEmpty() || t.startsWith("#")) continue;
-            npis.add(t);
+            if (!npis.add(t)) duplicates++;
         }
-        return npis;
+        if (duplicates > 0) {
+            logger.info("NPI file contained " + duplicates + " duplicate line(s); using "
+                    + npis.size() + " distinct NPIs.");
+        }
+        return new ArrayList<>(npis);
     }
 
     private static Map<String, String> loadHccIdsByNpi(List<String> npis) throws SQLException {

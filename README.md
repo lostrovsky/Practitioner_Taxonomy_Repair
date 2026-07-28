@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.6.3](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- two independent safety knobs in `run_repair.ps1`, both defaulting to safe: `$DryRun` gates database writes, `$HrpCallsLogMode` gates HRP calls. Live amends now require BOTH the script knob and `env.properties` to agree; a mismatch aborts the run. (v1.6.2 made dry-run the default and started recording the invocation in the transcript; v1.6.1 fixed `drop_cpe_repair_objects.sql` to also remove the legacy pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
+**Latest release:** [v1.6.4](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- **fixes a critical bug in v1.6.3** where `$HrpCallsLogMode = $true` did not actually suppress HRP calls when `env.properties` said `LOG_ONLY=false`: the log claimed log-only while live amends were sent. **Do not use v1.6.3.** Also adds delivery verification (the loader exits 0 even when every SOAP call fails), NPI deduplication, and an installer output fix. (v1.6.3 introduced the two safety knobs; v1.6.2 made dry-run the default; v1.6.1 fixed the drop script for pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.3\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.4\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.6.3
+   cd C:\temp\ptr_v1.6.4
    .\install.ps1
    ```
 
@@ -73,6 +73,8 @@ cd <base>\Practitioner_Taxonomy_Repair
 .\run_repair.ps1                      # honors whatever the param block says
 .\run_repair.ps1 -NpiFile pilot.txt   # same, scoped to a pilot list
 ```
+
+**Delivery is verified from the database, not the loader's exit code.** `Generic_HRP_WS_Call` exits 0 even when every SOAP call fails -- if the call throws (endpoint down, refused, TLS, DNS) it logs the error and swallows it, and its post-call SQL never runs, so rows are left `pending` with no error recorded. After a live run `run_repair.ps1` therefore re-queries `cpe_repair.practitioner_repair`; any row still `pending`/`failed` produces `Status: FAILED`, exit 1, and a resume hint. Without this, a total HRP outage reported success.
 
 `run_repair.ps1` calls the repair jar first, captures the `RUN_ID` from its stdout, then invokes `generic-hrp-ws-call.jar practitioner_taxonomy_repair --RUN_ID=<n> --env-file=...\env.properties`. End-of-run summary prints the invocation, explicit `DB writes:` / `HRP calls:` / `HRP decided by:` statements, and per-status row counts from `cpe_repair.practitioner_repair`. Concurrency-locked; transcript log written to `repair_<timestamp>.log` next to the script.
 

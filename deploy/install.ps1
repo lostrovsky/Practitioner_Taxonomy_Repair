@@ -351,12 +351,12 @@ if ($runDdl -ne "y") {
 }
 Write-Host "  2. Run the repair orchestrator. TWO SAFETY KNOBS, both safe by default --"
 Write-Host "     edit them in the param() block at the top of run_repair.ps1:"
-Write-Host "         [switch]\$DryRun           = \$true   # \$true = no DB writes"
-Write-Host "         [switch]\$HrpCallsLogMode  = \$true   # \$true = no HRP calls"
+Write-Host '         [switch]$DryRun           = $true   # $true = no DB writes'
+Write-Host '         [switch]$HrpCallsLogMode  = $true   # $true = no HRP calls'
 Write-Host ""
-Write-Host "     Phase 1 dry run     : DryRun=\$true   HrpCallsLogMode=\$true"
-Write-Host "     Phase 2 stage only  : DryRun=\$false  HrpCallsLogMode=\$true   + LOG_ONLY=true  in env.properties"
-Write-Host "     Phase 3 send amends : DryRun=\$false  HrpCallsLogMode=\$false  + LOG_ONLY=false in env.properties"
+Write-Host '     Phase 1 dry run     : DryRun=$true   HrpCallsLogMode=$true'
+Write-Host '     Phase 2 stage only  : DryRun=$false  HrpCallsLogMode=$true   + LOG_ONLY=true  in env.properties'
+Write-Host '     Phase 3 send amends : DryRun=$false  HrpCallsLogMode=$false  + LOG_ONLY=false in env.properties'
 Write-Host ""
 Write-Host "     Live HRP calls need BOTH the script knob and env.properties to agree;"
 Write-Host "     a mismatch aborts the run. Then:"
