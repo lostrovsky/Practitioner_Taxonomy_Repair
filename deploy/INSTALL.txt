@@ -34,7 +34,7 @@ Extract the release zip to any temporary directory -- NOT on top of
 your existing pipeline install. The installer will create the actual
 install folder. Example:
 
-    C:\temp\ptr_v1.6.1\
+    C:\temp\ptr_v1.6.3\
 
 Resulting layout:
 
@@ -46,6 +46,9 @@ Resulting layout:
     practitioner-taxonomy-repair-<ver>-jar-with-dependencies.jar
     sql\
         create_cpe_repair_objects.sql
+        drop_cpe_repair_objects.sql
+        rebuild_cpe_repair_objects.sql   (one-shot drop+create; use to bring a
+                                          pre-v1.5 database to the current schema)
     calls\
         practitioner_taxonomy_repair\
             practitioner_taxonomy_repair.properties
@@ -86,7 +89,7 @@ STEP 3: RUN install.ps1
 ============================================================
 From the extracted temp directory:
 
-    cd C:\temp\ptr_v1.6.1
+    cd C:\temp\ptr_v1.6.3
     .\install.ps1
 
 You'll be prompted for:
@@ -122,59 +125,74 @@ repair folder, not the extracted temp.
 
     cd <base>\Practitioner_Taxonomy_Repair
 
-*** DRY-RUN IS THE DEFAULT (since v1.6.2). ***
-A bare .\run_repair.ps1 writes NOTHING to the database and never calls the
-loader. Every real run -- staging or resume -- requires an explicit -Execute
-(or the literal equivalent -DryRun:$false).
+*** TWO SAFETY KNOBS, BOTH SAFE BY DEFAULT (since v1.6.3). ***
 
-There are two INDEPENDENT safety flags. Know which one you are using:
+They live in the param() block at the top of run_repair.ps1 and are meant to
+be EDITED THERE, not passed on the command line:
 
-    -Execute / -DryRun    controls whether cpe_repair rows are STAGED
-                          and whether the loader runs at all.
-    LOG_ONLY              (env.properties) controls whether the loader
-                          SENDS SOAP to HRP. With LOG_ONLY=true the rows
-                          are still staged; envelopes are only logged and
-                          the post-call SQL is dry-run, so rows stay
-                          'pending'.
+    [switch]$DryRun           = $true   # $true = stage nothing, no loader call
+    [switch]$HrpCallsLogMode  = $true   # $true = log envelopes, never call HRP
 
-Every run's log now states both explicitly, at STEP 1 and in the RUN SUMMARY:
+A bare .\run_repair.ps1 therefore writes nothing and calls nothing.
 
-    Invocation:   .\run_repair.ps1 -NpiFile pilot.txt -Execute
-    DB writes:    cpe_repair rows staged (repair_run + practitioner_repair + ...)
-    HRP calls:    NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run
+Work through the phases by editing the two knobs (plus $NpiFile for a pilot
+list, or $RunId to resume an existing run):
 
-Typical first run (dry-run -- confirms NPPES reachability and the
-staged/skipped counts without touching the database):
+  PHASE 1 -- dry run. Confirms NPPES reachability and the staged/skipped
+  counts without touching the database.
 
-    .\run_repair.ps1 -NpiFile pilot.txt
-        -> jar stages nothing, logs what it would stage. No loader call.
-           No run_id is assigned.
+      $DryRun          = $true
+      $HrpCallsLogMode = $true
+      $NpiFile         = "pilot.txt"
 
-Then stage for real, with LOG_ONLY=true in env.properties so HRP is not
-called (inspect the SOAP envelopes in the log):
+      -> No run_id assigned. No DB writes. No loader call.
 
-    .\run_repair.ps1 -NpiFile pilot.txt -Execute
-        -> jar stages a run and captures RUN_ID, then invokes the loader.
-           Watch the SOAP in the log; verify it looks right.
+  PHASE 2 -- stage for real, still no HRP traffic. Inspect the rendered SOAP
+  envelopes in the log before anything goes on the wire.
 
-When ready for real:
+      $DryRun          = $false
+      $HrpCallsLogMode = $true
+      $NpiFile         = "pilot.txt"
+      env.properties   : LOG_ONLY=true
 
-    # Set LOG_ONLY=false in env.properties (or pass -LogOnlyOverride for one run)
-    .\run_repair.ps1 -NpiFile pilot.txt -Execute
-        -> Real amends pushed to HRP. Spot-check the affected practitioners
-           in HRP.
+      -> cpe_repair rows staged, left 'pending'. RUN_ID printed -- note it.
 
-For the full population (no --npi-file -> auto-derive query, or NPI_QUERY
-override if set in install.config):
+  PHASE 3 -- send the amends. Skips staging entirely and re-invokes the
+  loader against the run staged in phase 2.
 
-    .\run_repair.ps1 -Description "Production repair run" -Execute
+      $DryRun          = $false
+      $HrpCallsLogMode = $false
+      $RunId           = "<the RUN_ID from phase 2>"
+      env.properties   : LOG_ONLY=false
 
-Resume mode (re-run only the loader against an existing run_id; useful
-after a mid-run loader failure). Resume re-sends real SOAP amends, so it
-needs -Execute too -- without it the script verifies the run exists and
-then stops before the loader:
+      -> Live SOAP amends. Rows flip to 'loaded'.
 
-    .\run_repair.ps1 -RunId 7 -Execute
+*** HRP CALLS REQUIRE BOTH GATES OPEN. ***
+$HrpCallsLogMode = $false is NOT sufficient on its own -- env.properties must
+also say LOG_ONLY=false. If the two disagree, the run ABORTS during STEP 1
+validation with a message naming both files. The script can tighten safety but
+can never enable HRP calls by itself.
+
+Note that the two knobs are independent of each other:
+
+    $DryRun           gates DB writes and whether the loader runs at all.
+    $HrpCallsLogMode  gates whether the loader SENDS. With it $true the rows
+                      are still staged; envelopes are only logged and the
+                      post-call SQL is dry-run, so rows stay 'pending'.
+
+Every run's log states both explicitly, at STEP 1 and in the RUN SUMMARY:
+
+    Invocation:     .\run_repair.ps1 -NpiFile 'pilot.txt' -HrpCallsLogMode $true
+    DB writes:      cpe_repair rows staged (repair_run + practitioner_repair + ...)
+    HRP calls:      NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run
+    HRP decided by: $HrpCallsLogMode = $true (env.properties said LOG_ONLY=false)
+
+For one-off command-line runs, -Execute is an alias for -DryRun:$false and
+-LogOnlyOverride for -HrpCallsLogMode. Both can only tighten, never loosen.
+
+Re-running install.ps1 REPLACES run_repair.ps1, which resets both knobs to
+their safe defaults. That is deliberate -- an upgrade should never inherit a
+half-configured live-send state. Re-apply your phase settings after upgrading.
 
 ============================================================
 STEP 5: VERIFY

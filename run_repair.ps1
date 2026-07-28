@@ -13,12 +13,37 @@ param(
     [string]$LogOutput = "both",
     [string]$NpiFile = "",
     [string]$Description = "",
-    [switch]$DryRun = $true,     # DEFAULTS TO TRUE. A bare `.\run_repair.ps1` stages NOTHING.
-                                  # Pass -Execute (or -DryRun:$false) to perform a real run.
-    [switch]$Execute,            # Opt in to a real run: stages cpe_repair rows and invokes the loader.
+    # ---- SAFETY KNOB 1 of 2: does this run write to the database? ----------
+    # EDIT THIS DEFAULT to change modes. $true is safe, matching $HrpCallsLogMode below;
+    # both knobs read the same way -- true means "don't do the dangerous thing".
+    #   $true  -> stage nothing, never invoke the loader (THE DEFAULT)
+    #   $false -> stage cpe_repair rows and invoke the loader
+    [switch]$DryRun = $true,
+
+    # CLI-only convenience alias for -DryRun:$false, for one-off real runs without
+    # editing the file. Mirrors -LogOnlyOverride below: an alias, not a second axis.
+    # Script-driven runs should leave this alone and set $DryRun instead.
+    [switch]$Execute,
     [string]$RunId = "",         # Resume mode: skip the stage phase, re-invoke the loader against an existing run.
                                   # TVF filters status NOT IN ('loaded','skipped') so previously-loaded rows complete instantly.
-    [switch]$LogOnlyOverride     # Override env.properties LOG_ONLY=false for one run. The loader's --LOG_ONLY=true wins regardless.
+    # CLI-only convenience alias for -HrpCallsLogMode 'true'. Mirrors -Execute above:
+    # an alias that can only tighten, not a second axis. Kept for compatibility.
+    [switch]$LogOnlyOverride,
+
+    # ---- SAFETY KNOB 2 of 2: does this run call HRP? ----------------------
+    # Second gate on HRP calls, on top of env.properties LOG_ONLY.
+    # EDIT THIS DEFAULT to change modes. Reads the same way as $DryRun above:
+    # $true is safe.
+    #   $true  -> log-only: envelopes logged, HRP never called (THE DEFAULT)
+    #   $false -> request live HRP calls
+    #
+    # Live amends require BOTH gates open: this default set to $false AND
+    # LOG_ONLY=false in env.properties. Neither file alone can put traffic on the
+    # wire. Setting this to $false while env.properties still says LOG_ONLY=true
+    # ABORTS the run -- a half-finished switch to live fails loudly instead of
+    # silently staying safe (which would look like a broken live run) or silently
+    # going live (which would be far worse).
+    [switch]$HrpCallsLogMode = $true
 )
 
 # ============================================================
@@ -50,17 +75,36 @@ $RESUME_MODE = ($RunId -ne "")
 # echo below, a completed log gives no way to tell a -DryRun from a real
 # staging run except by inferring it from downstream messages.
 #
-# Reconstructed from $PSBoundParameters rather than $MyInvocation.Line:
-# .Line returns the caller's ENTIRE command line, so an operator running
-# something like `$env:SQLCMDPASSWORD='...'; .\run_repair.ps1` would write
-# that secret straight into the transcript. $PSBoundParameters contains only
-# this script's own parameters, and also captures splatted/programmatic calls.
+# Built from the EFFECTIVE parameter values, not $PSBoundParameters, because
+# operators are expected to drive this script by editing the defaults in the
+# param block above rather than by passing arguments. $PSBoundParameters would
+# be empty in that workflow, so all three phases (dry-run / stage-only /
+# live-send) would log an identical "no parameters" line -- exactly the
+# ambiguity this record exists to remove. Effective values are truthful under
+# both workflows; the trailing tag says which one produced them.
+#
+# Deliberately NOT $MyInvocation.Line: that returns the caller's ENTIRE command
+# line, so an operator running `$env:SQLCMDPASSWORD='...'; .\run_repair.ps1`
+# would write that secret straight into the transcript.
+#
+# Computed after the -Execute resolution above so $DryRun is already final.
 # ============================================================
-$INVOCATION_PARAMS = ($PSBoundParameters.GetEnumerator() | Sort-Object Key | ForEach-Object {
-    if ($_.Value -is [switch]) { "-$($_.Key)" } else { "-$($_.Key) '$($_.Value)'" }
-}) -join ' '
-$INVOCATION_LINE = ".\$($MyInvocation.MyCommand.Name) $INVOCATION_PARAMS".TrimEnd()
-if ($PSBoundParameters.Count -eq 0) { $INVOCATION_LINE += "   (no parameters -- all defaulted)" }
+$effectiveParams = @()
+if ($NpiFile)                { $effectiveParams += "-NpiFile '$NpiFile'" }
+if ($Description)            { $effectiveParams += "-Description '$Description'" }
+if ($RunId)                  { $effectiveParams += "-RunId '$RunId'" }
+if ($Execute)                { $effectiveParams += "-Execute" }
+if ($DryRun)                 { $effectiveParams += "-DryRun" }
+if ($LogOnlyOverride)        { $effectiveParams += "-LogOnlyOverride" }
+$effectiveParams += "-HrpCallsLogMode `$$($HrpCallsLogMode.ToString().ToLower())"
+if ($LogOutput -ne "both")   { $effectiveParams += "-LogOutput '$LogOutput'" }
+
+$INVOCATION_LINE = ".\$($MyInvocation.MyCommand.Name) $($effectiveParams -join ' ')".TrimEnd()
+$INVOCATION_LINE += if ($PSBoundParameters.Count -gt 0) {
+    "   [from command line]"
+} else {
+    "   [from script defaults -- no arguments passed]"
+}
 
 # ============================================================
 # Directory configuration (all paths relative to script location)
@@ -135,6 +179,9 @@ function Get-RunSummaryLines {
         elseif ($LOG_ONLY)           { 'NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run (rows stay pending)' }
         else                         { 'LIVE -- SOAP amends sent to HRP' }
     )"
+    if ($LOG_ONLY_SOURCE -and -not $DryRun -and $RUN_ID) {
+        $lines += "HRP decided by: $LOG_ONLY_SOURCE"
+    }
 
     $lines += @(
         "Elapsed:      ${elapsed}s",
@@ -300,7 +347,40 @@ $LOG_ONLY_VALUE = $envProps["LOG_ONLY"]
 if (-not $LOG_ONLY_VALUE) {
     Remove-LockAndExit "LOG_ONLY is not defined in env.properties. It must be set to true or false."
 }
-$LOG_ONLY = ($LOG_ONLY_VALUE.Trim().ToLower() -eq "true") -or $LogOnlyOverride
+# ============================================================
+# Resolve HRP call mode. Two gates, and the SAFER one always wins:
+#   gate 1 = env.properties LOG_ONLY   (the authority)
+#   gate 2 = -HrpCallsLogMode          (this script; can only tighten)
+#
+# The script is deliberately incapable of enabling HRP calls. It can force
+# log-only ON regardless of the config, but asking for live calls when the
+# config says LOG_ONLY=true aborts the run instead of silently proceeding.
+# Anything else would let a checked-in default quietly override the one file
+# the operator treats as the authority on whether HRP gets touched.
+# ============================================================
+$LOG_ONLY_ENV = ($LOG_ONLY_VALUE.Trim().ToLower() -eq "true")
+
+# Both gates must be open for HRP to be called. Disagreement is an error, never a
+# silent resolution in either direction.
+if (-not $HrpCallsLogMode -and $LOG_ONLY_ENV) {
+    Remove-LockAndExit (
+        "Refusing to run: the two HRP safety gates disagree." + [Environment]::NewLine +
+        "  script  : `$HrpCallsLogMode = `$false  (requesting LIVE HRP calls)" + [Environment]::NewLine +
+        "  config  : LOG_ONLY=true              (suppressing HRP calls)" + [Environment]::NewLine +
+        [Environment]::NewLine +
+        "Live HRP calls require BOTH gates open. To send live amends, set LOG_ONLY=false in " +
+        $ENV_FILE + " as well. To stay in log-only mode, set `$HrpCallsLogMode = `$true in this script.")
+}
+
+# Log-only wins if either gate asks for it.
+$LOG_ONLY = $HrpCallsLogMode -or $LOG_ONLY_ENV -or $LogOnlyOverride
+
+# Record how the decision was reached -- the log should never leave this ambiguous.
+$LOG_ONLY_SOURCE =
+    if ($HrpCallsLogMode -and $LOG_ONLY_ENV) { "both gates: `$HrpCallsLogMode = `$true and env.properties LOG_ONLY=true" }
+    elseif ($HrpCallsLogMode)                { "`$HrpCallsLogMode = `$true (env.properties said LOG_ONLY=false; script tightened it)" }
+    elseif ($LogOnlyOverride)                { "-LogOnlyOverride (env.properties said LOG_ONLY=false; script tightened it)" }
+    else                                     { "both gates open: `$HrpCallsLogMode = `$false and env.properties LOG_ONLY=false" }
 
 # ============================================================
 # Verify database connectivity NOW, before any work begins.
@@ -338,13 +418,15 @@ if ($DryRun) {
     Write-Host "  - The jar still calls NPPES and diffs against cpe_master," -ForegroundColor Yellow
     Write-Host "    so the staged/skipped counts below are accurate" -ForegroundColor Yellow
     Write-Host "" -ForegroundColor Yellow
-    Write-Host "  To perform a REAL run:  .\run_repair.ps1 -Execute $(if ($NpiFile) { "-NpiFile $NpiFile" })" -ForegroundColor Yellow
+    Write-Host "  To perform a REAL run:  set `$DryRun = `$false in this script's param block" -ForegroundColor Yellow
+    Write-Host "                          (or, one-off:  .\run_repair.ps1 -Execute $(if ($NpiFile) { "-NpiFile $NpiFile" }))" -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Yellow
 }
 elseif ($LOG_ONLY) {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Yellow
     Write-Host "  LOG-ONLY MODE ACTIVE" -ForegroundColor Yellow
+    Write-Host "  - Decided by: $LOG_ONLY_SOURCE" -ForegroundColor Yellow
     Write-Host "  - Loader will be invoked with --LOG_ONLY=true" -ForegroundColor Yellow
     Write-Host "  - HRP receives no SOAP calls; envelopes are logged instead" -ForegroundColor Yellow
     Write-Host "  - cpe_repair rows still get inserted by the stage step" -ForegroundColor Yellow
@@ -354,6 +436,7 @@ else {
     Write-Host ""
     Write-Host "============================================================" -ForegroundColor Red
     Write-Host "  REAL RUN -- LOG_ONLY=false" -ForegroundColor Red
+    Write-Host "  - Decided by: $LOG_ONLY_SOURCE" -ForegroundColor Red
     Write-Host "  - cpe_repair rows will be staged" -ForegroundColor Red
     Write-Host "  - LIVE SOAP amends will be sent to HRP" -ForegroundColor Red
     Write-Host "============================================================" -ForegroundColor Red

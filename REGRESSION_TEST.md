@@ -3,6 +3,14 @@
 Manual smoke test that exercises the four interesting code paths in v1.3.0+
 (diff-and-skip) under v1.4.0+ (install + run_repair.ps1 orchestration):
 
+> **Since v1.6.3** `run_repair.ps1` has two safety knobs in its `param()` block,
+> both defaulting to safe: `$DryRun = $true` (no DB writes) and
+> `$HrpCallsLogMode = $true` (no HRP calls). The `-Execute` flags below are the
+> command-line alias for `-DryRun:$false` and still work as written. HRP stays
+> suppressed throughout this runbook by `$HrpCallsLogMode`, on top of the
+> `LOG_ONLY=true` this procedure already requires -- so the two gates agree and
+> no live amend can escape.
+
 1. **Install** — install.config -> generated env.properties + PractitionerTaxonomyRepair.properties; call folder copied to loader; DDL idempotent re-apply
 2. **Skip path** — every NPI in the pilot already matches NPPES; repair jar records status='skipped'; loader sees 0 rows from the TVF
 3. **Stage-amend path** — at least one NPI differs (master.is_primary on the wrong code); repair jar stages a pending row; loader renders the SOAP envelope (LOG_ONLY) or sends it (real)
