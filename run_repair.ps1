@@ -647,3 +647,9 @@ if ($UNDELIVERED -gt 0) {
 Write-RunSummary -Status "SUCCESS"
 Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
 try { Stop-Transcript | Out-Null } catch {}
+
+# Explicit success code. Without this the process inherits $LASTEXITCODE from
+# whatever native command ran last -- in practice the sqlcmd that fetches the
+# per-status row counts for the summary -- so a fully successful run could exit
+# non-zero and be read as a failure by any caller that checks.
+exit 0
