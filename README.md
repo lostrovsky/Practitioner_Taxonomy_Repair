@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.6.4](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- **fixes a critical bug in v1.6.3** where `$HrpCallsLogMode = $true` did not actually suppress HRP calls when `env.properties` said `LOG_ONLY=false`: the log claimed log-only while live amends were sent. **Do not use v1.6.3.** Also adds delivery verification (the loader exits 0 even when every SOAP call fails), NPI deduplication, and an installer output fix. (v1.6.3 introduced the two safety knobs; v1.6.2 made dry-run the default; v1.6.1 fixed the drop script for pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
+**Latest release:** [v1.6.5](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- removes the `-Execute` and `-LogOnlyOverride` command-line aliases, leaving exactly one control per axis: `$DryRun` for database writes, `$HrpCallsLogMode` for HRP calls, both `$true` = safe and both set by editing the `param()` block. (v1.6.4 fixed a critical bug where `$HrpCallsLogMode = $true` did not actually suppress HRP calls -- **v1.6.3 must not be used**; v1.6.2 made dry-run the default; v1.6.1 fixed the drop script for pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.4\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.5\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.6.4
+   cd C:\temp\ptr_v1.6.5
    .\install.ps1
    ```
 
@@ -65,8 +65,6 @@ A bare `.\run_repair.ps1` therefore writes nothing and calls nothing. Work throu
 Set `$NpiFile` for a pilot list, or `$RunId` to resume an existing run in phase 3.
 
 **HRP calls need both gates open.** `$HrpCallsLogMode = $false` alone is not enough -- `env.properties` must also say `LOG_ONLY=false`. If they disagree, the run aborts during prerequisite validation with a message naming both files. The script can tighten safety but can never enable HRP calls on its own.
-
-For one-off command-line runs, `-Execute` is an alias for `-DryRun:$false` and `-LogOnlyOverride` for `-HrpCallsLogMode`. Both can only tighten.
 
 ```powershell
 cd <base>\Practitioner_Taxonomy_Repair

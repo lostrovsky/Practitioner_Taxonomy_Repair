@@ -8,7 +8,7 @@
 # ============================================================
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidDefaultValueSwitchParameter', '',
-    Justification = 'Deliberate. This tool writes remediation rows to cpe_repair and pushes SOAP amends to HRP, so the safe state must be the default one: a bare invocation stages nothing. -Execute is the explicit opt-in for a real run.')]
+    Justification = 'Deliberate. This tool writes remediation rows to cpe_repair and pushes SOAP amends to HRP, so the safe state must be the default one: a bare invocation stages nothing. Set $DryRun = $false to opt into a real run.')]
 param(
     [string]$LogOutput = "both",
     [string]$NpiFile = "",
@@ -20,16 +20,8 @@ param(
     #   $false -> stage cpe_repair rows and invoke the loader
     [switch]$DryRun = $true,
 
-    # CLI-only convenience alias for -DryRun:$false, for one-off real runs without
-    # editing the file. Mirrors -LogOnlyOverride below: an alias, not a second axis.
-    # Script-driven runs should leave this alone and set $DryRun instead.
-    [switch]$Execute,
     [string]$RunId = "",         # Resume mode: skip the stage phase, re-invoke the loader against an existing run.
                                   # TVF filters status NOT IN ('loaded','skipped') so previously-loaded rows complete instantly.
-    # CLI-only convenience alias for -HrpCallsLogMode 'true'. Mirrors -Execute above:
-    # an alias that can only tighten, not a second axis. Kept for compatibility.
-    [switch]$LogOnlyOverride,
-
     # ---- SAFETY KNOB 2 of 2: does this run call HRP? ----------------------
     # Second gate on HRP calls, on top of env.properties LOG_ONLY.
     # EDIT THIS DEFAULT to change modes. Reads the same way as $DryRun above:
@@ -49,17 +41,10 @@ param(
 # ============================================================
 # Dry-run is the DEFAULT. Staging real cpe_repair rows requires an explicit
 # opt-in, so an accidental bare invocation can never write to the database.
-#
-# -Execute is the readable inverse; -DryRun:$false is the literal one. Passing
-# both -Execute and an explicit -DryRun is contradictory, so fail loudly rather
-# than silently picking one.
+# There is exactly ONE control per axis: $DryRun here, $HrpCallsLogMode below.
+# Both are meant to be set by editing the defaults above.
 # ============================================================
 $dryRunExplicit = $PSBoundParameters.ContainsKey('DryRun')
-if ($Execute -and $dryRunExplicit -and $DryRun) {
-    Write-Error "Contradictory parameters: -Execute requests a real run but -DryRun was also passed. Pass exactly one."
-    exit 1
-}
-if ($Execute) { $DryRun = [switch]$false }
 
 # Resume mode short-circuits the stage phase.
 $RESUME_MODE = ($RunId -ne "")
@@ -87,15 +72,13 @@ $RESUME_MODE = ($RunId -ne "")
 # line, so an operator running `$env:SQLCMDPASSWORD='...'; .\run_repair.ps1`
 # would write that secret straight into the transcript.
 #
-# Computed after the -Execute resolution above so $DryRun is already final.
+# Computed after the param block so $DryRun / $HrpCallsLogMode are already final.
 # ============================================================
 $effectiveParams = @()
 if ($NpiFile)                { $effectiveParams += "-NpiFile '$NpiFile'" }
 if ($Description)            { $effectiveParams += "-Description '$Description'" }
 if ($RunId)                  { $effectiveParams += "-RunId '$RunId'" }
-if ($Execute)                { $effectiveParams += "-Execute" }
 if ($DryRun)                 { $effectiveParams += "-DryRun" }
-if ($LogOnlyOverride)        { $effectiveParams += "-LogOnlyOverride" }
 $effectiveParams += "-HrpCallsLogMode `$$($HrpCallsLogMode.ToString().ToLower())"
 if ($LogOutput -ne "both")   { $effectiveParams += "-LogOutput '$LogOutput'" }
 
@@ -375,13 +358,12 @@ if (-not $HrpCallsLogMode -and $LOG_ONLY_ENV) {
 }
 
 # Log-only wins if either gate asks for it.
-$LOG_ONLY = $HrpCallsLogMode -or $LOG_ONLY_ENV -or $LogOnlyOverride
+$LOG_ONLY = $HrpCallsLogMode -or $LOG_ONLY_ENV
 
 # Record how the decision was reached -- the log should never leave this ambiguous.
 $LOG_ONLY_SOURCE =
     if ($HrpCallsLogMode -and $LOG_ONLY_ENV) { "both gates: `$HrpCallsLogMode = `$true and env.properties LOG_ONLY=true" }
     elseif ($HrpCallsLogMode)                { "`$HrpCallsLogMode = `$true (env.properties said LOG_ONLY=false; script tightened it)" }
-    elseif ($LogOnlyOverride)                { "-LogOnlyOverride (env.properties said LOG_ONLY=false; script tightened it)" }
     else                                     { "both gates open: `$HrpCallsLogMode = `$false and env.properties LOG_ONLY=false" }
 
 # ============================================================
@@ -421,7 +403,6 @@ if ($DryRun) {
     Write-Host "    so the staged/skipped counts below are accurate" -ForegroundColor Yellow
     Write-Host "" -ForegroundColor Yellow
     Write-Host "  To perform a REAL run:  set `$DryRun = `$false in this script's param block" -ForegroundColor Yellow
-    Write-Host "                          (or, one-off:  .\run_repair.ps1 -Execute $(if ($NpiFile) { "-NpiFile $NpiFile" }))" -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Yellow
 }
 elseif ($LOG_ONLY) {
@@ -532,7 +513,7 @@ if ($RESUME_MODE -and $DryRun) {
     Write-Host "  Run $RUN_ID exists and is resumable, but resuming re-sends" -ForegroundColor Yellow
     Write-Host "  real SOAP amends for its pending/failed rows." -ForegroundColor Yellow
     Write-Host "" -ForegroundColor Yellow
-    Write-Host "  To actually resume:  .\run_repair.ps1 -RunId $RUN_ID -Execute" -ForegroundColor Yellow
+    Write-Host "  To actually resume:  set `$DryRun = `$false and `$RunId = '$RUN_ID', then re-run" -ForegroundColor Yellow
     Write-Host "============================================================" -ForegroundColor Yellow
     Write-RunSummary -Status "DRY-RUN"
     Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
@@ -545,7 +526,8 @@ if ($RESUME_MODE -and $DryRun) {
 # ============================================================
 Write-Step "STEP 3: Loading practitioner_taxonomy_repair (run_id=$RUN_ID)"
 
-# Build loader args. --LOG_ONLY=true is honored when env says LOG_ONLY=true OR -LogOnlyOverride passed.
+# Build loader args. --LOG_ONLY=true whenever EITHER gate asked for log-only;
+# $LOG_ONLY is the single resolved answer, so pass it through directly.
 $loaderArgs = @("-jar", $WS_JAR, $CALL_DIR, "--RUN_ID=$RUN_ID", "--log-output=$LogOutput", "--env-file=$ENV_FILE")
 if ($LOG_ONLY) { $loaderArgs += "--LOG_ONLY=true" }
 
@@ -636,7 +618,7 @@ if ($UNDELIVERED -gt 0) {
     Write-Host "  Check the STEP 3 output above for 'error:' / 'failed' lines." -ForegroundColor Red
     Write-Host ""
     Write-Host "  To retry after fixing the cause:" -ForegroundColor Yellow
-    Write-Host "    .\run_repair.ps1 -RunId $RUN_ID -Execute" -ForegroundColor Yellow
+    Write-Host "    set `$RunId = '$RUN_ID' (with `$DryRun = `$false) and re-run" -ForegroundColor Yellow
     Write-Host "  Already-loaded rows are skipped by the TVF, so only these retry." -ForegroundColor Yellow
     Write-RunSummary -Status "FAILED -- $UNDELIVERED row(s) undelivered"
     Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue

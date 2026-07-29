@@ -5,10 +5,10 @@ Manual smoke test that exercises the four interesting code paths in v1.3.0+
 
 > **Since v1.6.3** `run_repair.ps1` has two safety knobs in its `param()` block,
 > both defaulting to safe: `$DryRun = $true` (no DB writes) and
-> `$HrpCallsLogMode = $true` (no HRP calls). The `-Execute` flags below are the
-> command-line alias for `-DryRun:$false` and still work as written. HRP stays
-> suppressed throughout this runbook by `$HrpCallsLogMode`, on top of the
-> `LOG_ONLY=true` this procedure already requires -- so the two gates agree and
+> `$HrpCallsLogMode = $true` (no HRP calls). **Set `$DryRun = $false` in the
+> `param()` block before the staging steps below** -- as of v1.6.5 there is no
+> command-line alias for it. Leave `$HrpCallsLogMode = $true` throughout; on top
+> of the `LOG_ONLY=true` this procedure already requires, the two gates agree and
 > no live amend can escape.
 
 1. **Install** — install.config -> generated env.properties + PractitionerTaxonomyRepair.properties; call folder copied to loader; DDL idempotent re-apply
@@ -107,7 +107,7 @@ Write them to `C:\Tools\PTR_smoke\Practitioner_Taxonomy_Repair\pilot.txt`
 
 ```powershell
 cd C:\Tools\PTR_smoke\Practitioner_Taxonomy_Repair
-.\run_repair.ps1 -NpiFile pilot.txt -Description "regression: skip path" -Execute
+.\run_repair.ps1 -NpiFile pilot.txt -Description "regression: skip path"
 ```
 
 **Expected:**
@@ -151,7 +151,7 @@ Write a one-line pilot file and run:
 
 ```powershell
 "1003008574" | Set-Content inject_test.txt
-.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: inject" -Execute
+.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: inject"
 ```
 
 **Expected:**
@@ -185,7 +185,7 @@ FROM cpe_master.practitioner_taxonomy WHERE npi='1003008574' ORDER BY taxonomy_c
 
 ```powershell
 # Re-run repair against the same NPI; should now skip
-.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: restore verify" -Execute
+.\run_repair.ps1 -NpiFile inject_test.txt -Description "regression: restore verify"
 # Expected: 1 skipped, 0 staged
 ```
 
@@ -240,7 +240,7 @@ that same batch:
 
 ```powershell
 # Replace <n> with the run_id from Step 5
-.\run_repair.ps1 -RunId <n> -Execute
+.\run_repair.ps1 -RunId <n>
 ```
 
 **Expected:** STEP 2 skipped (resume banner printed); STEP 3 runs the loader

@@ -34,7 +34,7 @@ Extract the release zip to any temporary directory -- NOT on top of
 your existing pipeline install. The installer will create the actual
 install folder. Example:
 
-    C:\temp\ptr_v1.6.4\
+    C:\temp\ptr_v1.6.5\
 
 Resulting layout:
 
@@ -89,7 +89,7 @@ STEP 3: RUN install.ps1
 ============================================================
 From the extracted temp directory:
 
-    cd C:\temp\ptr_v1.6.4
+    cd C:\temp\ptr_v1.6.5
     .\install.ps1
 
 You'll be prompted for:
@@ -197,9 +197,6 @@ Every run's log states both explicitly, at STEP 1 and in the RUN SUMMARY:
     DB writes:      cpe_repair rows staged (repair_run + practitioner_repair + ...)
     HRP calls:      NONE -- LOG_ONLY=true; envelopes logged, post-call SQL dry-run
     HRP decided by: $HrpCallsLogMode = $true (env.properties said LOG_ONLY=false)
-
-For one-off command-line runs, -Execute is an alias for -DryRun:$false and
--LogOnlyOverride for -HrpCallsLogMode. Both can only tighten, never loosen.
 
 Re-running install.ps1 REPLACES run_repair.ps1, which resets both knobs to
 their safe defaults. That is deliberate -- an upgrade should never inherit a
