@@ -444,18 +444,49 @@ public class PractitionerTaxonomyRepair {
         return new ArrayList<>(npis);
     }
 
+    /**
+     * SQL Server rejects any request carrying more than 2100 parameters. Every IN-clause
+     * below binds one parameter per element, so an unbatched query fails outright once the
+     * input list crosses that line -- which is exactly what happened on the first full-scale
+     * UAT run (17,841 NPIs): "The incoming request has too many parameters."
+     * 1000 leaves ample headroom for the handful of non-list parameters a query might add.
+     */
+    private static final int SQL_IN_BATCH = 1000;
+
+    /** An action over one batch; separate from Consumer because these throw SQLException. */
+    @FunctionalInterface
+    private interface BatchAction<T> { void run(List<T> batch) throws SQLException; }
+
+    /**
+     * Run {@code action} over {@code items} in slices of {@link #SQL_IN_BATCH}, so callers can
+     * build IN-clauses without worrying about the parameter ceiling. Results are accumulated by
+     * the action itself; batching is invisible to the caller apart from the log line.
+     */
+    private static <T> void inBatches(String what, List<T> items, BatchAction<T> action) throws SQLException {
+        if (items.size() > SQL_IN_BATCH) {
+            int batches = (items.size() + SQL_IN_BATCH - 1) / SQL_IN_BATCH;
+            logger.info("Querying " + what + " for " + items.size() + " values in " + batches
+                    + " batches of up to " + SQL_IN_BATCH + " (SQL Server caps a request at 2100 parameters).");
+        }
+        for (int start = 0; start < items.size(); start += SQL_IN_BATCH) {
+            action.run(items.subList(start, Math.min(items.size(), start + SQL_IN_BATCH)));
+        }
+    }
+
     private static Map<String, String> loadHccIdsByNpi(List<String> npis) throws SQLException {
         Map<String, String> map = new HashMap<>();
         if (npis.isEmpty()) return map;
-        String sql = "SELECT npi, practitioner_hcc_id FROM " + masterSchema + ".practitioner WHERE npi IN ("
-                + commaPlaceholders(npis.size()) + ")";
         Connection conn = dbManager.getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < npis.size(); i++) ps.setString(i + 1, npis.get(i));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) map.put(rs.getString(1), rs.getString(2));
+        inBatches("practitioner_hcc_id", npis, batch -> {
+            String sql = "SELECT npi, practitioner_hcc_id FROM " + masterSchema + ".practitioner WHERE npi IN ("
+                    + commaPlaceholders(batch.size()) + ")";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < batch.size(); i++) ps.setString(i + 1, batch.get(i));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) map.put(rs.getString(1), rs.getString(2));
+                }
             }
-        }
+        });
         return map;
     }
 
@@ -467,29 +498,31 @@ public class PractitionerTaxonomyRepair {
     private static Map<String, MasterSnapshot> loadMasterSnapshotsByNpi(List<String> npis) throws SQLException {
         Map<String, MasterSnapshot> result = new HashMap<>();
         if (npis.isEmpty()) return result;
-        String sql = "SELECT npi, taxonomy_code, is_primary FROM " + masterSchema + ".practitioner_taxonomy " +
-                "WHERE npi IN (" + commaPlaceholders(npis.size()) + ")";
         Map<String, Set<String>> codesByNpi   = new HashMap<>();
         Map<String, String>      primaryByNpi = new HashMap<>();
         Connection conn = dbManager.getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < npis.size(); i++) ps.setString(i + 1, npis.get(i));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String npi  = rs.getString(1);
-                    String code = rs.getString(2);
-                    boolean isPrimary = rs.getBoolean(3);
-                    codesByNpi.computeIfAbsent(npi, k -> new LinkedHashSet<>()).add(code);
-                    if (isPrimary) {
-                        String existing = primaryByNpi.putIfAbsent(npi, code);
-                        if (existing != null && !existing.equals(code)) {
-                            logger.warning("NPI " + npi + " has multiple is_primary=1 rows in " + masterSchema +
-                                    ".practitioner_taxonomy (" + existing + ", " + code + "); using first encountered: " + existing);
+        inBatches("master taxonomies", npis, batch -> {
+            String sql = "SELECT npi, taxonomy_code, is_primary FROM " + masterSchema + ".practitioner_taxonomy " +
+                    "WHERE npi IN (" + commaPlaceholders(batch.size()) + ")";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < batch.size(); i++) ps.setString(i + 1, batch.get(i));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String npi  = rs.getString(1);
+                        String code = rs.getString(2);
+                        boolean isPrimary = rs.getBoolean(3);
+                        codesByNpi.computeIfAbsent(npi, k -> new LinkedHashSet<>()).add(code);
+                        if (isPrimary) {
+                            String existing = primaryByNpi.putIfAbsent(npi, code);
+                            if (existing != null && !existing.equals(code)) {
+                                logger.warning("NPI " + npi + " has multiple is_primary=1 rows in " + masterSchema +
+                                        ".practitioner_taxonomy (" + existing + ", " + code + "); using first encountered: " + existing);
+                            }
                         }
                     }
                 }
             }
-        }
+        });
         for (Map.Entry<String, Set<String>> e : codesByNpi.entrySet()) {
             result.put(e.getKey(), new MasterSnapshot(e.getValue(), primaryByNpi.get(e.getKey())));
         }
@@ -500,16 +533,18 @@ public class PractitionerTaxonomyRepair {
         Map<String, String> map = new HashMap<>();
         if (codes.isEmpty()) return map;
         List<String> codeList = new ArrayList<>(codes);
-        String sql = "SELECT " + taxonomyCodeColumn + ", " + taxonomyNameColumn +
-                     " FROM " + taxonomyLookupTable +
-                     " WHERE " + taxonomyCodeColumn + " IN (" + commaPlaceholders(codeList.size()) + ")";
         Connection conn = dbManager.getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            for (int i = 0; i < codeList.size(); i++) ps.setString(i + 1, codeList.get(i));
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) map.put(rs.getString(1), rs.getString(2));
+        inBatches("taxonomy names", codeList, batch -> {
+            String sql = "SELECT " + taxonomyCodeColumn + ", " + taxonomyNameColumn +
+                         " FROM " + taxonomyLookupTable +
+                         " WHERE " + taxonomyCodeColumn + " IN (" + commaPlaceholders(batch.size()) + ")";
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                for (int i = 0; i < batch.size(); i++) ps.setString(i + 1, batch.get(i));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) map.put(rs.getString(1), rs.getString(2));
+                }
             }
-        }
+        });
         // Anything not found → log; the SQL INSERT will use NULL for taxonomy_name.
         for (String c : codes) if (!map.containsKey(c))
             logger.warning("No " + taxonomyNameColumn + " in " + taxonomyLookupTable + " for code " + c + " (will insert NULL)");

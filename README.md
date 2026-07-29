@@ -2,7 +2,7 @@
 
 One-off remediation tool for practitioners loaded with the wrong primary taxonomy by [Claim_Provider_Data_Extractor](https://github.com/lostrovsky/Claim_Provider_Data_Pipeline) versions before v1.4.1.
 
-**Latest release:** [v1.6.5](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- removes the `-Execute` and `-LogOnlyOverride` command-line aliases, leaving exactly one control per axis: `$DryRun` for database writes, `$HrpCallsLogMode` for HRP calls, both `$true` = safe and both set by editing the `param()` block. (v1.6.4 fixed a critical bug where `$HrpCallsLogMode = $true` did not actually suppress HRP calls -- **v1.6.3 must not be used**; v1.6.2 made dry-run the default; v1.6.1 fixed the drop script for pre-v1.5 objects; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
+**Latest release:** [v1.6.6](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) -- batches every `IN (...)` lookup so the tool works at full population size. Previously any NPI list over ~2,100 died on SQL Server's parameter ceiling (`The incoming request has too many parameters`), which is what a 17,841-NPI UAT run hit. (v1.6.5 reduced the safety controls to one knob per axis; v1.6.4 fixed a critical bug where `$HrpCallsLogMode = $true` did not actually suppress HRP calls -- **v1.6.3 must not be used**; v1.6.2 made dry-run the default; v1.6.0 added fail-fast on unresolved primary, `sp_finalize_repair_run`, CHECK constraints, and JUnit tests.)
 
 The bug wiped the NPPES `is_primary` marker before the create-ranking CTE could use it, so practitioners with NPPES-source taxonomies got an arbitrary primary in HRP instead of the NPPES-marked one. v1.4.1 fixed the extractor going forward but did not retroactively fix already-loaded practitioners. This tool does that.
 
@@ -32,12 +32,12 @@ This is an add-on to your existing Claim Provider Data Pipeline install. It crea
 
 ### Install
 
-1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.5\`.
+1. Download the latest release zip from the [releases page](https://github.com/lostrovsky/Practitioner_Taxonomy_Repair/releases/latest) and extract it to a **temporary** directory (not on top of your existing install) -- e.g., `C:\temp\ptr_v1.6.6\`.
 2. Open `install.config` in the extracted folder and fill in the values: `DB_URL`, `DB_USER`, `DB_PASSWORD`, `WS_BASE_URL`, `CONNECTOR_ADMIN_PASSWORD`, `LOG_ONLY`, `SQLCMD_PATH`. (Most can be copy-pasted from your daily pipeline's `env.properties`.)
 3. Run the installer:
 
    ```powershell
-   cd C:\temp\ptr_v1.6.5
+   cd C:\temp\ptr_v1.6.6
    .\install.ps1
    ```
 
@@ -87,10 +87,11 @@ echo 1234567890 >> pilot.txt
 .\run_repair.ps1 -NpiFile pilot.txt      # dry-run + log-only by default
 ```
 
-**Custom SQL** -- set `NPI_QUERY` in `install.config` (re-run `install.ps1` to regenerate the properties file). The jar uses it verbatim when `--npi-file` is not passed; useful for a `cpe_load.load_run` bug-window filter. Example:
+**Custom SQL** -- set `NPI_QUERY` in `install.config` (re-run `install.ps1` to regenerate the properties file). The jar uses it verbatim when `--npi-file` is not passed. The practical use is scoping to the bug window: `cpe_master.practitioner_taxonomy` carries `created_time`, so no join is needed.
 ```
-NPI_QUERY=SELECT DISTINCT pt.npi FROM cpe_master.practitioner_taxonomy pt JOIN cpe_load.<...> lr ON ... WHERE pt.taxonomy_source='NPPES' AND lr.run_date BETWEEN '<start>' AND '<end>'
+NPI_QUERY=SELECT DISTINCT npi FROM cpe_master.practitioner_taxonomy WHERE taxonomy_source='NPPES' AND created_time < '<day after the fixed build was deployed>'
 ```
+Cut *after* the deployment day, not on it -- a build deployed mid-day still produced bad rows that morning. Over-selecting is free (matching NPIs are recorded as `skipped`); under-selecting leaves wrong primaries in HRP.
 
 `-NpiFile` always wins over `NPI_QUERY`. When neither is set, the jar uses the built-in default (every practitioner with at least one `NPPES`-source taxonomy in `cpe_master`).
 
