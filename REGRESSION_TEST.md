@@ -57,7 +57,7 @@ Remove-Item C:\Tools\PTR_smoke,C:\Tools\PTR_smoke_extracted -Recurse -Force -Err
 
 # Loader sibling stub
 New-Item -Path C:\Tools\PTR_smoke\Claim_Provider_Data_Loader -ItemType Directory -Force
-Copy-Item "$env:USERPROFILE\VSCode_Projects\Generic_HRP_WS_Call\target\generic-hrp-ws-call-1.0.0-jar-with-dependencies.jar" `
+Copy-Item "$env:USERPROFILE\VSCode_Projects\General\utils\Generic_HRP_WS_Call\target\generic-hrp-ws-call-1.0.0-jar-with-dependencies.jar" `
           C:\Tools\PTR_smoke\Claim_Provider_Data_Loader\generic-hrp-ws-call.jar
 
 # Extract the release zip
